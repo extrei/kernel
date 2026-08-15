@@ -15,7 +15,7 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from .controller import read_artifact as read_artifact_bytes
-from .controller import record_artifact
+from .controller import record_step
 from .kernel import StateTreeError, verify
 
 PROJECT_ENVIRONMENT_VARIABLE = "KERNEL_PROJECT"
@@ -24,12 +24,9 @@ ACTOR_ENVIRONMENT_VARIABLE = "KERNEL_ACTOR"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SERVER_INSTRUCTIONS = (
     "This server is bound to one project-local kernel and one agent "
-    "identity. Call kernel_status before using the kernel. Submit only finished "
-    "project artifacts with submit_artifact; share the returned content_hash with "
-    "other agents, which can retrieve it with read_artifact. The actor identity is "
-    "fixed when the server starts and must never come from a tool argument. The "
-    "kernel records artifact facts but does not accept a blueprint or advance "
-    "accepted project state on an agent's authority."
+    "identity. Submit finished project steps with submit_step and share their "
+    "content hashes with other agents through read_artifact. The actor identity "
+    "is fixed when the server starts and must never come from a tool argument."
 )
 
 
@@ -83,7 +80,7 @@ def create_server(
         }
 
     @server.tool(
-        title="Submit an artifact",
+        title="Submit a step",
         annotations=ToolAnnotations(
             read_only_hint=False,
             destructive_hint=False,
@@ -91,15 +88,15 @@ def create_server(
             open_world_hint=False,
         ),
     )
-    def submit_artifact(
+    def submit_step(
         task_id: str,
         artifact_path: str,
-        kind: str = "result",
+        kind: str,
     ) -> dict[str, str | int]:
-        """Store one project file and append its immutable artifact ledger fact."""
+        """Store one project file and append its immutable ledger step."""
 
         current = binding()
-        record = record_artifact(
+        record = record_step(
             current.project_root,
             agent=current.actor,
             task_id=task_id,
@@ -151,10 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--project",
-        help=(
-            "project containing .state-tree; defaults to KERNEL_PROJECT "
-            "or the current directory"
-        ),
+        help="project containing .state-tree; required unless KERNEL_PROJECT is set",
     )
     parser.add_argument(
         "--actor",
@@ -185,7 +179,9 @@ def _resolve_binding(
     environment: Mapping[str, str] | None = None,
 ) -> ServerBinding:
     process_environment = os.environ if environment is None else environment
-    project_value = project_root or process_environment.get(PROJECT_ENVIRONMENT_VARIABLE) or "."
+    project_value = project_root or process_environment.get(PROJECT_ENVIRONMENT_VARIABLE)
+    if not project_value:
+        raise MCPConfigurationError("project must be fixed with --project or KERNEL_PROJECT")
     root = Path(project_value).expanduser().resolve()
     if not root.is_dir():
         raise MCPConfigurationError(f"project directory does not exist: {root}")

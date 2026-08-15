@@ -1,5 +1,4 @@
 import contextlib
-from hashlib import sha256
 import io
 import json
 from pathlib import Path
@@ -7,19 +6,20 @@ import tempfile
 import unittest
 
 from kernel.cli import main
+from kernel.controller import record_step
 from kernel.kernel import (
     _GENESIS_HASH,
-    HASH_ALGORITHM,
     KERNEL_STATE_FILE,
     OBJECTS_DIRECTORY,
     STATE_TREE_DIRECTORY,
     StateTreeError,
+    entries,
     initialize,
 )
 
 
 class StateTreeInitializationTests(unittest.TestCase):
-    def test_initialization_creates_a_hashed_empty_accepted_state(self) -> None:
+    def test_initialization_creates_an_empty_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project = Path(temporary_directory) / "project"
             project.mkdir()
@@ -29,20 +29,14 @@ class StateTreeInitializationTests(unittest.TestCase):
             self.assertTrue(result.created)
             state_tree = project / STATE_TREE_DIRECTORY
             state = json.loads((state_tree / KERNEL_STATE_FILE).read_text())
-            algorithm, digest = state["accepted_state"].split(":", maxsplit=1)
-            object_file = state_tree / OBJECTS_DIRECTORY / algorithm / digest
 
-            self.assertEqual(algorithm, HASH_ALGORITHM)
             self.assertEqual(state["format"], "state-tree")
             self.assertEqual(state["format_version"], 1)
             self.assertEqual(state["ledger_head"], f"sha256:{_GENESIS_HASH}")
             self.assertEqual(state["revision"], 0)
-            self.assertTrue(object_file.is_file())
-            self.assertEqual(sha256(object_file.read_bytes()).hexdigest(), digest)
-            self.assertEqual(
-                json.loads(object_file.read_text()),
-                {"kind": "accepted-state", "value": {}, "version": 1},
-            )
+            object_directory = state_tree / OBJECTS_DIRECTORY / "sha256"
+            self.assertTrue(object_directory.is_dir())
+            self.assertEqual(list(object_directory.iterdir()), [])
 
     def test_valid_existing_tree_is_a_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -82,6 +76,45 @@ class StateTreeInitializationTests(unittest.TestCase):
 
             self.assertIn("Initialized state tree", output.getvalue())
             self.assertIn("Already initialized state tree", output.getvalue())
+
+    def test_cli_log_prints_three_verified_entries_and_respects_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "project"
+            project.mkdir()
+            initialize(project)
+            for index, kind in enumerate(("research", "decision", "development"), start=1):
+                artifact = project / f"step-{index}.txt"
+                artifact.write_text(f"step {index}", encoding="utf-8")
+                record_step(
+                    project,
+                    agent=f"agent-{index}",
+                    task_id="log-test",
+                    artifact=artifact,
+                    kind=kind,
+                )
+
+            ledger_entries = entries(project)
+            fields = (
+                "sequence",
+                "recorded_at",
+                "actor",
+                "kind",
+                "task_id",
+                "payload_hash",
+            )
+            expected_lines = [
+                " ".join(str(entry[field]) for field in fields)
+                for entry in ledger_entries
+            ]
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["log", str(project)]), 0)
+            self.assertEqual(output.getvalue().splitlines(), expected_lines)
+
+            limited_output = io.StringIO()
+            with contextlib.redirect_stdout(limited_output):
+                self.assertEqual(main(["log", str(project), "--limit", "2"]), 0)
+            self.assertEqual(limited_output.getvalue().splitlines(), expected_lines[-2:])
 
     def test_cli_rejects_a_missing_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

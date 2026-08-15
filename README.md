@@ -1,8 +1,8 @@
 # Project Kernel
 
-A small, local coordination kernel for human-approved work by coding agents.
+A small, local, append-only coordination ledger for agent work. Each project owns its own `.state-tree/`; runner skills remain outside this repository.
 
-The repository contains no legacy ledger, compatibility layer, hosted workflow, model runner, or scheduler. Each project owns its own state tree; model-specific invocation remains in external Codex, Claude, DeepSeek, or GLM skills.
+The kernel records completed steps. It does not route agents, enforce transitions, decide outcomes, or depend on GitHub.
 
 ## Initialize a project
 
@@ -10,17 +10,17 @@ The repository contains no legacy ledger, compatibility layer, hosted workflow, 
 state-tree init /path/to/project
 ```
 
-This creates the local kernel boundary:
+This creates the local ledger boundary:
 
 ```text
 .state-tree/
-├── kernel.json             # accepted-state and durable-ledger pointers
-├── kernel.lock             # serializes concurrent kernel writes
+├── kernel.json             # format, revision, and ledger-head reference
+├── kernel.lock             # serializes concurrent writes
 └── objects/
-    └── sha256/             # immutable, content-addressed objects
+    └── sha256/             # immutable, content-addressed bytes
 ```
 
-Initialization stores a canonical empty accepted-state object. Repeating the command against a valid state tree is a safe no-op; it never replaces existing state.
+Repeating initialization against a valid tree is a safe no-op; it never replaces existing state.
 
 For development before installing the console command:
 
@@ -28,19 +28,28 @@ For development before installing the console command:
 python -m kernel init /path/to/project
 ```
 
-## Exchange artifacts
+## Record and read steps
 
-Artifact recording stores project files as immutable objects and appends genesis-rooted ledger entries. Only files inside the project and outside `.state-tree/` are accepted. Another agent retrieves the bytes using the returned SHA-256 reference.
+`record_step` stores a project file as immutable bytes and appends a genesis-rooted ledger entry. A caller supplies its `task_id` and opaque `kind`; only files inside the project and outside `.state-tree/` are accepted.
+
+A human reads the full verified ledger with:
+
+```text
+state-tree log /path/to/project
+state-tree log /path/to/project --limit 10
+```
+
+Each line contains: sequence, timestamp, actor, kind, task ID, and payload hash. Agents exchange those hashes with a handoff rather than querying the ledger.
 
 ## Local MCP server
 
 `kernel-mcp` exposes three tools over stdio:
 
 - `kernel_status`
-- `submit_artifact`
+- `submit_step`
 - `read_artifact`
 
-The project and actor identity are fixed when the process starts and are not tool arguments:
+The project and actor identity are fixed when the process starts and are not tool arguments. A project is required explicitly through `--project` or `KERNEL_PROJECT`:
 
 ```text
 kernel-mcp --project /path/to/project --actor codex

@@ -4,11 +4,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from kernel.controller import record_artifact
+from kernel.controller import record_step
 from kernel.kernel import KERNEL_STATE_FILE, STATE_TREE_DIRECTORY, initialize, verify
 
 
-class ConcurrentArtifactTests(unittest.TestCase):
+class ConcurrentStepTests(unittest.TestCase):
     def test_concurrent_agents_do_not_lose_ledger_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project = Path(temporary_directory) / "project"
@@ -21,7 +21,7 @@ class ConcurrentArtifactTests(unittest.TestCase):
                 artifacts.append(artifact)
 
             def record(index: int):
-                return record_artifact(
+                return record_step(
                     project,
                     agent=f"agent-{index}",
                     task_id="parallel-task",

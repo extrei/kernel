@@ -33,6 +33,7 @@ _LEDGER_ENTRY_KEYS = {
     "previous_hash",
     "recorded_at",
     "sequence",
+    "task_id",
     "version",
 }
 
@@ -98,6 +99,19 @@ def verify(project_root: str | Path = ".") -> str:
     return _validate_state_tree(root / STATE_TREE_DIRECTORY)
 
 
+def entries(project_root: str | Path = ".") -> list[dict[str, Any]]:
+    """Return every verified ledger entry, ordered from oldest to newest."""
+
+    root = _resolve_project_root(project_root)
+    state_tree = root / STATE_TREE_DIRECTORY
+    state = _read_kernel_state(state_tree)
+    return _verify_ledger(
+        _object_directory(state_tree),
+        revision=state["revision"],
+        head_digest=_digest_from_reference(state["ledger_head"], label="ledger head"),
+    )
+
+
 def store_object(project_root: str | Path, content: bytes) -> str:
     """Store immutable bytes and return their SHA-256 reference."""
 
@@ -125,6 +139,7 @@ def append_ledger_entry(
     *,
     actor: str,
     kind: str,
+    task_id: str,
     payload_hash: str,
     metadata: Mapping[str, Any],
 ) -> LedgerAppend:
@@ -134,6 +149,8 @@ def append_ledger_entry(
         raise StateTreeError("ledger actor must be a non-empty string")
     if not isinstance(kind, str) or not kind:
         raise StateTreeError("ledger kind must be a non-empty string")
+    if not isinstance(task_id, str) or not task_id:
+        raise StateTreeError("ledger task id must be a non-empty string")
     if not isinstance(metadata, Mapping):
         raise StateTreeError("ledger metadata must be an object")
 
@@ -158,6 +175,7 @@ def append_ledger_entry(
             "previous_hash": previous_digest,
             "recorded_at": recorded_at,
             "sequence": sequence,
+            "task_id": task_id,
             "version": _LEDGER_ENTRY_VERSION,
         }
         try:
@@ -186,16 +204,7 @@ def _create_state_tree(state_tree: Path) -> None:
     object_directory.mkdir(parents=True)
     (state_tree / KERNEL_LOCK_FILE).touch(mode=0o600)
 
-    initial_object = _canonical_json_bytes(
-        {
-            "kind": "accepted-state",
-            "value": {},
-            "version": 1,
-        }
-    )
-    accepted_state = _store_object_at(object_directory, initial_object)
     kernel_state = {
-        "accepted_state": accepted_state,
         "format": FORMAT_NAME,
         "format_version": FORMAT_VERSION,
         "ledger_head": f"{HASH_ALGORITHM}:{_GENESIS_HASH}",
@@ -209,7 +218,7 @@ def _validate_state_tree(state_tree: Path) -> str:
     return state["ledger_head"]
 
 
-def _validated_kernel_state(state_tree: Path) -> dict[str, Any]:
+def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
     if state_tree.is_symlink() or not state_tree.is_dir():
         raise StateTreeError(f"State tree is not a directory: {state_tree}")
 
@@ -241,21 +250,29 @@ def _validated_kernel_state(state_tree: Path) -> dict[str, Any]:
     if type(revision) is not int or revision < 0:
         raise StateTreeError(f"Invalid kernel revision: {state_file}")
 
-    accepted_digest = _digest_from_reference(
-        parsed_state.get("accepted_state"), label="accepted state"
-    )
-    _read_hashed_object(object_directory, accepted_digest, label="accepted state")
-
-    head_digest = _digest_from_reference(parsed_state.get("ledger_head"), label="ledger head")
-    _verify_ledger(object_directory, revision=revision, head_digest=head_digest)
     return parsed_state
 
 
-def _verify_ledger(object_directory: Path, *, revision: int, head_digest: str) -> str:
+def _validated_kernel_state(state_tree: Path) -> dict[str, Any]:
+    state = _read_kernel_state(state_tree)
+    _verify_ledger(
+        _object_directory(state_tree),
+        revision=state["revision"],
+        head_digest=_digest_from_reference(state["ledger_head"], label="ledger head"),
+    )
+    return state
+
+
+def _verify_ledger(
+    object_directory: Path,
+    *,
+    revision: int,
+    head_digest: str,
+) -> list[dict[str, Any]]:
     if revision == 0:
         if head_digest != _GENESIS_HASH:
             raise LedgerIntegrityError("empty ledger does not point to the genesis hash")
-        return head_digest
+        return []
 
     reverse_chain: list[tuple[str, dict[str, Any]]] = []
     current_digest = head_digest
@@ -295,7 +312,7 @@ def _verify_ledger(object_directory: Path, *, revision: int, head_digest: str) -
 
     if previous_digest != head_digest:
         raise LedgerIntegrityError("kernel ledger head does not match the verified chain")
-    return head_digest
+    return [entry for _, entry in reversed(reverse_chain)]
 
 
 def _validate_ledger_entry(
@@ -314,6 +331,8 @@ def _validate_ledger_entry(
         raise LedgerIntegrityError(f"ledger sequence {expected_sequence} has an invalid actor")
     if not isinstance(entry.get("kind"), str) or not entry["kind"]:
         raise LedgerIntegrityError(f"ledger sequence {expected_sequence} has an invalid kind")
+    if not isinstance(entry.get("task_id"), str) or not entry["task_id"]:
+        raise LedgerIntegrityError(f"ledger sequence {expected_sequence} has an invalid task id")
     if not isinstance(entry.get("metadata"), dict):
         raise LedgerIntegrityError(f"ledger sequence {expected_sequence} has invalid metadata")
     if not isinstance(entry.get("recorded_at"), str) or not entry["recorded_at"]:

@@ -6,13 +6,23 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from .kernel import StateTreeError, initialize
+from .kernel import StateTreeError, entries, initialize
+
+
+def _nonnegative_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("limit must be an integer") from error
+    if limit < 0:
+        raise argparse.ArgumentTypeError("limit must be non-negative")
+    return limit
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="state-tree",
-        description="Create and inspect a project's local accepted-state tree.",
+        description="Create and read a project's local coordination ledger.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -25,6 +35,23 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=".",
         help="existing project directory (default: current directory)",
+    )
+
+    log_parser = commands.add_parser(
+        "log",
+        help="print verified ledger entries for a human reader",
+    )
+    log_parser.add_argument(
+        "project",
+        nargs="?",
+        default=".",
+        help="existing project directory (default: current directory)",
+    )
+    log_parser.add_argument(
+        "--limit",
+        type=_nonnegative_limit,
+        metavar="N",
+        help="print only the last N entries",
     )
     return parser
 
@@ -44,6 +71,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         action = "Initialized" if result.created else "Already initialized"
         print(f"{action} state tree at {result.state_tree}")
+        return 0
+
+    if arguments.command == "log":
+        try:
+            ledger_entries = entries(arguments.project)
+        except StateTreeError as error:
+            print(f"state-tree: {error}", file=sys.stderr)
+            return 2
+
+        if arguments.limit is not None:
+            ledger_entries = ledger_entries[-arguments.limit :] if arguments.limit else []
+        for entry in ledger_entries:
+            print(
+                f"{entry['sequence']} {entry['recorded_at']} {entry['actor']} "
+                f"{entry['kind']} {entry['task_id']} {entry['payload_hash']}"
+            )
         return 0
 
     parser.error(f"Unknown command: {arguments.command}")

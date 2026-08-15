@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from kernel.controller import ArtifactError, read_artifact, record_artifact
+from kernel.controller import StepError, read_artifact, record_step
 from kernel.kernel import (
     _GENESIS_HASH,
     KERNEL_STATE_FILE,
@@ -16,7 +16,7 @@ from kernel.kernel import (
 )
 
 
-class ArtifactRecordingTests(unittest.TestCase):
+class StepRecordingTests(unittest.TestCase):
     def test_recording_stores_content_and_advances_the_ledger_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project = Path(temporary_directory) / "project"
@@ -25,19 +25,17 @@ class ArtifactRecordingTests(unittest.TestCase):
             artifact = project / "result.txt"
             artifact.write_text("agent result", encoding="utf-8")
 
-            initial_state = self._state(project)
-            record = record_artifact(
+            record = record_step(
                 project,
                 agent="claude",
                 task_id="task-1",
                 artifact=artifact,
-                kind="result",
+                kind="research-note",
             )
 
             state = self._state(project)
             self.assertEqual(record.sequence, 1)
             self.assertEqual(record.size, len(b"agent result"))
-            self.assertEqual(state["accepted_state"], initial_state["accepted_state"])
             self.assertEqual(state["ledger_head"], record.entry_hash)
             self.assertEqual(state["revision"], 1)
             self.assertEqual(read_artifact(project, record.content_hash), b"agent result")
@@ -45,17 +43,16 @@ class ArtifactRecordingTests(unittest.TestCase):
 
             entry = self._object_json(project, record.entry_hash)
             self.assertEqual(entry["actor"], "claude")
-            self.assertEqual(entry["kind"], "artifact-recorded")
+            self.assertEqual(entry["kind"], "research-note")
+            self.assertEqual(entry["task_id"], "task-1")
             self.assertEqual(entry["payload_hash"], record.content_hash)
             self.assertEqual(entry["previous_hash"], _GENESIS_HASH)
             self.assertEqual(
                 entry["metadata"],
                 {
-                    "artifact_kind": "result",
                     "bytes": len(b"agent result"),
                     "name": "result.txt",
                     "path": "result.txt",
-                    "task_id": "task-1",
                 },
             )
 
@@ -69,14 +66,14 @@ class ArtifactRecordingTests(unittest.TestCase):
             first_file.write_text("analysis", encoding="utf-8")
             second_file.write_text("review", encoding="utf-8")
 
-            first = record_artifact(
+            first = record_step(
                 project,
                 agent="claude",
                 task_id="task-2",
                 artifact=first_file,
                 kind="analysis",
             )
-            second = record_artifact(
+            second = record_step(
                 project,
                 agent="deep-seek",
                 task_id="task-2",
@@ -98,7 +95,7 @@ class ArtifactRecordingTests(unittest.TestCase):
             initialize(project)
             artifact = project / "result.txt"
             artifact.write_text("result", encoding="utf-8")
-            record = record_artifact(
+            record = record_step(
                 project,
                 agent="glm",
                 task_id="task-3",
@@ -118,7 +115,7 @@ class ArtifactRecordingTests(unittest.TestCase):
             initialize(project)
             artifact = project / "result.txt"
             artifact.write_text("result", encoding="utf-8")
-            record = record_artifact(
+            record = record_step(
                 project,
                 agent="codex",
                 task_id="task-4",
@@ -140,22 +137,49 @@ class ArtifactRecordingTests(unittest.TestCase):
             outside = root / "outside.txt"
             outside.write_text("outside", encoding="utf-8")
 
-            with self.assertRaisesRegex(ArtifactError, "inside the project"):
-                record_artifact(
+            with self.assertRaisesRegex(StepError, "inside the project"):
+                record_step(
                     project,
                     agent="codex",
                     task_id="task-5",
                     artifact=outside,
                     kind="result",
                 )
-            with self.assertRaisesRegex(ArtifactError, "inside .state-tree"):
-                record_artifact(
+            with self.assertRaisesRegex(StepError, "inside .state-tree"):
+                record_step(
                     project,
                     agent="codex",
                     task_id="task-5",
                     artifact=project / STATE_TREE_DIRECTORY / KERNEL_STATE_FILE,
                     kind="result",
                 )
+
+    def test_task_id_is_required_and_must_match_the_identifier_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "project"
+            project.mkdir()
+            initialize(project)
+            artifact = project / "result.txt"
+            artifact.write_text("result", encoding="utf-8")
+
+            with self.assertRaises(TypeError):
+                record_step(
+                    project,
+                    agent="codex",
+                    artifact=artifact,
+                    kind="result",
+                )
+
+            for task_id in ("", "not a task id"):
+                with self.subTest(task_id=task_id):
+                    with self.assertRaises(StepError):
+                        record_step(
+                            project,
+                            agent="codex",
+                            task_id=task_id,
+                            artifact=artifact,
+                            kind="result",
+                        )
 
     @staticmethod
     def _state(project: Path) -> dict[str, object]:

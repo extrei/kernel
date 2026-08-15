@@ -18,7 +18,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.project = Path(self.temporary_directory.name)
         initialize(self.project)
 
-    async def test_tools_bind_identity_and_exchange_text_artifact(self) -> None:
+    async def test_tools_bind_identity_and_exchange_text_step(self) -> None:
         artifact = self.project / "result.txt"
         artifact.write_text("runner output\n", encoding="utf-8")
         server = create_server(self.project, "claude")
@@ -28,13 +28,14 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             tools = {tool.name: tool for tool in listed.tools}
             self.assertEqual(
                 set(tools),
-                {"kernel_status", "read_artifact", "submit_artifact"},
+                {"kernel_status", "read_artifact", "submit_step"},
             )
             self.assertTrue(tools["kernel_status"].annotations.read_only_hint)
             self.assertTrue(tools["read_artifact"].annotations.read_only_hint)
-            self.assertFalse(tools["submit_artifact"].annotations.read_only_hint)
-            self.assertNotIn("actor", tools["submit_artifact"].input_schema["properties"])
-            self.assertNotIn("project", tools["submit_artifact"].input_schema["properties"])
+            self.assertFalse(tools["submit_step"].annotations.read_only_hint)
+            self.assertNotIn("actor", tools["submit_step"].input_schema["properties"])
+            self.assertNotIn("project", tools["submit_step"].input_schema["properties"])
+            self.assertIn("kind", tools["submit_step"].input_schema["required"])
 
             status = await client.call_tool("kernel_status", {})
             self.assertFalse(status.is_error)
@@ -45,7 +46,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
 
             submitted = await client.call_tool(
-                "submit_artifact",
+                "submit_step",
                 {
                     "artifact_path": "result.txt",
                     "kind": "result",
@@ -72,7 +73,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
         async with Client(server) as client:
             submitted = await client.call_tool(
-                "submit_artifact",
+                "submit_step",
                 {
                     "artifact_path": "result.bin",
                     "kind": "result",
@@ -97,7 +98,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             server = create_server(self.project, "deep-seek")
             async with Client(server) as client:
                 result = await client.call_tool(
-                    "submit_artifact",
+                    "submit_step",
                     {
                         "artifact_path": outside.name,
                         "kind": "result",
