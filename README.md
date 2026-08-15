@@ -50,7 +50,7 @@ The project must already contain a valid `.state-tree/`. Example project-scoped 
 
 ```toml
 [mcp_servers.kernel]
-command = "/Users/osika/kernel/.venv/bin/kernel-mcp"
+command = "/Users/[user]/kernel/.venv/bin/kernel-mcp"
 args = ["--project", "/absolute/path/to/project", "--actor", "codex"]
 default_tools_approval_mode = "writes"
 ```
