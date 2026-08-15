@@ -1,0 +1,209 @@
+"""Local stdio MCP boundary for one project kernel and one agent identity."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import re
+import sys
+
+from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
+
+from .controller import read_artifact as read_artifact_bytes
+from .controller import record_artifact
+from .kernel import StateTreeError, verify
+
+PROJECT_ENVIRONMENT_VARIABLE = "KERNEL_PROJECT"
+ACTOR_ENVIRONMENT_VARIABLE = "KERNEL_ACTOR"
+
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_SERVER_INSTRUCTIONS = (
+    "This server is bound to one project-local kernel and one agent "
+    "identity. Call kernel_status before using the kernel. Submit only finished "
+    "project artifacts with submit_artifact; share the returned content_hash with "
+    "other agents, which can retrieve it with read_artifact. The actor identity is "
+    "fixed when the server starts and must never come from a tool argument. The "
+    "kernel records artifact facts but does not accept a blueprint or advance "
+    "accepted project state on an agent's authority."
+)
+
+
+class MCPConfigurationError(RuntimeError):
+    """Raised when the MCP process is not bound to a valid project and actor."""
+
+
+@dataclass(frozen=True)
+class ServerBinding:
+    """The immutable authority assigned to one running MCP server."""
+
+    project_root: Path
+    actor: str
+
+
+def create_server(
+    project_root: str | Path | None = None,
+    actor: str | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> MCPServer:
+    """Create a server whose tools resolve one launch-bound project and actor."""
+
+    process_environment = os.environ if environment is None else environment
+    server = MCPServer(
+        "project-kernel",
+        title="Project kernel",
+        instructions=_SERVER_INSTRUCTIONS,
+        version="0.4.0",
+    )
+
+    def binding() -> ServerBinding:
+        return _resolve_binding(
+            project_root,
+            actor,
+            environment=process_environment,
+        )
+
+    @server.tool(
+        title="Inspect kernel status",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    def kernel_status() -> dict[str, str]:
+        """Verify the complete ledger and return this server's fixed binding."""
+
+        current = binding()
+        return {
+            "actor": current.actor,
+            "ledger_head": verify(current.project_root),
+            "project_root": str(current.project_root),
+        }
+
+    @server.tool(
+        title="Submit an artifact",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    def submit_artifact(
+        task_id: str,
+        artifact_path: str,
+        kind: str = "result",
+    ) -> dict[str, str | int]:
+        """Store one project file and append its immutable artifact ledger fact."""
+
+        current = binding()
+        record = record_artifact(
+            current.project_root,
+            agent=current.actor,
+            task_id=task_id,
+            artifact=artifact_path,
+            kind=kind,
+        )
+        return {
+            "actor": record.agent,
+            "artifact_path": str(record.artifact_path),
+            "content_hash": record.content_hash,
+            "entry_hash": record.entry_hash,
+            "kind": record.kind,
+            "sequence": record.sequence,
+            "size": record.size,
+            "task_id": record.task_id,
+        }
+
+    @server.tool(
+        title="Read an artifact",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    def read_artifact(content_hash: str) -> dict[str, str | int]:
+        """Verify the ledger and return stored artifact bytes by SHA-256 reference."""
+
+        current = binding()
+        content = read_artifact_bytes(current.project_root, content_hash)
+        try:
+            value = content.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            value = base64.b64encode(content).decode("ascii")
+            encoding = "base64"
+        return {
+            "content": value,
+            "content_hash": content_hash,
+            "encoding": encoding,
+            "size": len(content),
+        }
+
+    return server
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for the stdio server."""
+
+    parser = argparse.ArgumentParser(
+        prog="kernel-mcp",
+        description="Run a project-local kernel over MCP stdio.",
+    )
+    parser.add_argument(
+        "--project",
+        help=(
+            "project containing .state-tree; defaults to KERNEL_PROJECT "
+            "or the current directory"
+        ),
+    )
+    parser.add_argument(
+        "--actor",
+        help="fixed agent identity; defaults to KERNEL_ACTOR",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate the launch binding, then serve MCP over stdin and stdout."""
+
+    arguments = build_parser().parse_args(argv)
+    try:
+        current = _resolve_binding(arguments.project, arguments.actor)
+        verify(current.project_root)
+    except (MCPConfigurationError, StateTreeError) as error:
+        print(f"kernel-mcp: {error}", file=sys.stderr)
+        return 2
+
+    create_server(current.project_root, current.actor).run()
+    return 0
+
+
+def _resolve_binding(
+    project_root: str | Path | None,
+    actor: str | None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> ServerBinding:
+    process_environment = os.environ if environment is None else environment
+    project_value = project_root or process_environment.get(PROJECT_ENVIRONMENT_VARIABLE) or "."
+    root = Path(project_value).expanduser().resolve()
+    if not root.is_dir():
+        raise MCPConfigurationError(f"project directory does not exist: {root}")
+
+    actor_value = actor or process_environment.get(ACTOR_ENVIRONMENT_VARIABLE)
+    if not isinstance(actor_value, str) or not _IDENTIFIER.fullmatch(actor_value):
+        raise MCPConfigurationError(
+            "actor must be fixed with --actor or KERNEL_ACTOR and contain "
+            "1-64 letters, digits, dots, hyphens, or underscores"
+        )
+    return ServerBinding(root, actor_value)
+
+
+# The module-level object supports `mcp run kernel/mcp.py` when the two
+# KERNEL_* environment variables are supplied. Configuration is resolved
+# lazily so importing the package cannot accidentally bind the wrong project.
+mcp = create_server()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
