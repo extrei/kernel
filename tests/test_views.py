@@ -141,6 +141,7 @@ class ViewDerivationTests(unittest.TestCase):
             )
 
     def test_budget_that_cannot_hold_elision_markers_fails(self) -> None:
+        snapshot = {"value": "x" * 200}
         contract = self._contract(
             {
                 "worker": {
@@ -151,8 +152,12 @@ class ViewDerivationTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(ViewError, "cannot fit"):
-            derive_view({"value": "x" * 200}, contract, None, "worker")
+        with self.assertRaises(ViewError) as raised:
+            derive_view(snapshot, contract, None, "worker")
+
+        message = str(raised.exception)
+        self.assertIn("budget 10", message)
+        self.assertIn(f"unelided size is {len(self._canonical(snapshot))}", message)
 
     def test_collection_reference_is_never_hydrated(self) -> None:
         reference = f"sha256:{'a' * 64}"
@@ -352,7 +357,7 @@ class ViewDerivationTests(unittest.TestCase):
             actor=actor,
             task_id=task_id,
             blueprint={
-                "version": 2,
+                "version": 3,
                 "schema": None,
                 "contracts": contracts,
             },

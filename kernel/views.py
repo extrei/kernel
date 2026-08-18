@@ -318,7 +318,8 @@ def _apply_budget(
     candidate_paths: list[str],
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     result = deepcopy(document)
-    if budget is None or _canonical_characters(result) <= budget:
+    unelided_size = _canonical_characters(result)
+    if budget is None or unelided_size <= budget:
         _canonical_view_bytes(result)
         return result, {}
 
@@ -349,7 +350,8 @@ def _apply_budget(
             return result, elisions
 
     raise ViewError(
-        f"derived view cannot fit its {budget}-character budget"
+        f"derived view cannot fit budget {budget}; unelided size is "
+        f"{unelided_size} characters"
     )
 
 

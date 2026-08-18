@@ -16,6 +16,47 @@ from kernel.kernel import LedgerIntegrityError, initialize, verify
 
 
 class CollectionTests(unittest.TestCase):
+    def test_initial_state_collection_is_externalized_and_resolvable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            record = set_blueprint(
+                project,
+                actor="architect",
+                task_id="collection-seed",
+                blueprint={
+                    "version": 3,
+                    "schema": {
+                        "properties": {
+                            "actions": {
+                                "items": {"type": "object"},
+                                "type": "array",
+                                "x-kernel-collection": True,
+                            }
+                        },
+                        "required": ["actions"],
+                        "type": "object",
+                    },
+                    "contracts": {
+                        "version": 2,
+                        "actors": {
+                            "worker": {
+                                "read": ["/actions", "/actions/*"],
+                                "write": ["/actions", "/actions/*"],
+                            }
+                        },
+                    },
+                    "initial_state": {"actions": []},
+                },
+            )
+
+            snapshot = state(project)
+            self.assertEqual(set(snapshot["actions"]), {"$collection"})
+            self.assertEqual(collection(project, "/actions"), [])
+            entry = self._entry(project, record.entry_hash)
+            self.assertNotEqual(entry["parent_state"], entry["state"])
+            self.assertEqual(verify(project, strict=True), record.entry_hash)
+
     def test_marked_array_is_externalized_and_patch_hydrates_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -276,7 +317,7 @@ class CollectionTests(unittest.TestCase):
             actor=actor,
             task_id=task_id,
             blueprint={
-                "version": 2,
+                "version": 3,
                 "schema": schema,
                 "contracts": {
                     "version": 2,

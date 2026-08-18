@@ -20,12 +20,18 @@ def run(
     provider: Provider,
     max_steps: int = 40,
     default_actor: str = "worker",
+    compose: bool = False,
 ) -> dict[str, Any]:
-    """Install authority and execute a bounded, deterministic runner loop."""
+    """Reuse or install authority and execute a bounded runner loop."""
 
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError("max_steps must be a positive integer")
-    installed = install(project_root, task, task_id=task_id)
+    existing = blueprint(project_root)
+    installed = (
+        install(project_root, task, task_id=task_id)
+        if compose or existing is None
+        else existing
+    )
     current_actor = default_actor
     results: list[dict[str, Any]] = []
     notices: list[str] = []
@@ -34,6 +40,8 @@ def run(
     total_cost = 0.0
     cost_known = True
     halt_reason: str | None = None
+    previous_failure: tuple[Any, ...] | None = None
+    consecutive_failures = 0
 
     while len(results) < max_steps:
         verdict = circuit(project_root)
@@ -67,6 +75,21 @@ def run(
             cost_known = False
         else:
             total_cost += result["cost_usd"]
+        if result["accepted"]:
+            previous_failure = None
+            consecutive_failures = 0
+        else:
+            failure = (actor, result["error_type"], result["error"])
+            consecutive_failures = (
+                consecutive_failures + 1 if failure == previous_failure else 1
+            )
+            previous_failure = failure
+            if consecutive_failures >= 2:
+                halt_reason = "runner repeated an identical failure"
+                break
+
+    if halt_reason is None and len(results) >= max_steps:
+        halt_reason = "max_steps"
 
     return {
         "blueprint": installed,

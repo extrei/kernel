@@ -101,14 +101,14 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             actor="human",
             task_id="mcp-view",
             blueprint={
-                "version": 2,
+                "version": 3,
                 "schema": None,
                 "contracts": {
-                "version": 2,
-                "actors": {
-                    "claude": {"read": ["/public"], "write": ["/public"]},
-                    "glm": {"read": ["/secret"], "write": ["/secret"]},
-                },
+                    "version": 2,
+                    "actors": {
+                        "claude": {"read": ["/public"], "write": ["/public"]},
+                        "glm": {"read": ["/secret"], "write": ["/secret"]},
+                    },
                 },
             },
         )
@@ -225,7 +225,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             actor="human",
             task_id="mcp-setup",
             blueprint={
-                "version": 2,
+                "version": 3,
                 "schema": None,
                 "contracts": {
                     "version": 2,

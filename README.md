@@ -79,17 +79,25 @@ Schema and Write Contracts enter the kernel only as one versioned Blueprint:
 
 ```json
 {
-  "version": 2,
-  "schema": {"type": "object"},
-  "contracts": {"version": 2, "actors": {}},
+  "version": 3,
+  "schema": {
+    "type": "object",
+    "properties": {"status": {"type": "string"}},
+    "required": ["status"]
+  },
+  "contracts": {
+    "version": 2,
+    "actors": {"worker": {"read": ["/status"], "write": ["/status"]}}
+  },
+  "initial_state": {"status": "planning"},
   "rules": [
-    {"on": {"op": "add", "path": "/claims/*"}, "wake": "verifier"}
+    {"on": {"op": "replace", "path": "/status"}, "wake": "worker"}
   ],
   "circuit": {"consecutive_rejections": 2, "cycle_window": 3}
 }
 ```
 
-`rules` and `circuit` are optional. The circuit defaults shown above apply when its values are absent. `set_blueprint(...)` validates this document against the hand-written `meta_schema()`, checks the Draft 2020-12 Schema and version 2 Write Contracts together, validates every Workflow Rule and Circuit Policy, validates the current live Snapshot, and advances one `blueprint_head` in the same ledger commit. Blueprint version 1 is rejected. There are no independent Schema or Contract installation functions.
+`initial_state`, `rules`, and `circuit` are optional. At the genesis empty Snapshot, `initial_state` may seed a value that satisfies the new Schema; it can never overwrite a non-empty Snapshot. Without it, the current live Snapshot must already satisfy the Schema. The circuit defaults shown above apply when its values are absent. `set_blueprint(...)` validates this document against the hand-written `meta_schema()`, checks the Draft 2020-12 Schema and version 2 Write Contracts together, validates every Workflow Rule and Circuit Policy, and advances the Blueprint, Snapshot, and ledger heads atomically. Blueprint version 2 is rejected. There are no independent Schema or Contract installation functions.
 
 `blueprint(...)` returns the authority document in force. `schema(...)` and `contracts(...)` are projections of it. Later patches are rejected before object storage when their candidate Snapshot violates the active Schema. `verify(...)` remains structural; `audit_schema(...)` explicitly re-evaluates each historical Snapshot through the Blueprint recorded on its own ledger entry.
 
@@ -103,7 +111,7 @@ A version 2 Write Contract grants actor-specific authority. `add`, `replace`, an
 
 With no Blueprint in force, non-removal patches remain allowed and `remove` fails closed. Authorization runs before collection hydration, patch evaluation, schema validation, or Snapshot storage. The candidate Patch is retained first so a refusal remains auditable. `verify(...)` checks Blueprint objects structurally; `audit_contracts(...)` is the explicit human audit of historical patch authority.
 
-An actor rule may set a positive `budget`, measured in characters of canonical JSON. `view(project, actor=...)` derives and stores that actor's deterministic subdocument from the current Snapshot and the Write Contract and Schema bound by one Blueprint. Visible schema fragments appear under `$schema`; Collection references remain opaque handles.
+An actor rule may set a `budget`, measured in characters of canonical JSON. The minimum is 256 characters; 512–2000 is a practical range for a typical actor. `view(project, actor=...)` derives and stores that actor's deterministic subdocument from the current Snapshot and the Write Contract and Schema bound by one Blueprint. Visible schema fragments appear under `$schema`; Collection references remain opaque handles.
 
 When a View exceeds its budget, large visible entries are replaced deterministically with `{"$elided":{"bytes":N,"hash":"sha256:…"}}`. The hash resolves to the canonical original value through the existing object read path. If even the elided form cannot fit, View derivation fails.
 
@@ -115,9 +123,9 @@ Normal verification may reuse `.state-tree/cache/verified`; malformed, missing, 
 
 ## Rejections, circuits, and schedules
 
-An attributable Patch refusal appends a ledger v5 `rejection` entry and re-raises the original exception. Its canonical payload records the candidate Patch hash, touched paths, reason, and one of six stages: `syntax`, `stale_parent`, `auth`, `view`, `apply`, or `schema`. A rejection advances the ledger revision but keeps `parent_state == state`, so neither the State Head nor Blueprint Head changes.
+An attributable Patch refusal appends a ledger v5 `rejection` entry and re-raises the original exception. Its canonical payload records the candidate Patch hash, touched paths, reason, and one of six stages: `syntax`, `stale_parent`, `auth`, `view`, `apply`, or `schema`. A runner error before Patch evaluation is instead recorded by `record_failure(...)` as a distinct `failure` entry with stage `view`, `provider`, or `parse`. Both advance the ledger revision but keep `parent_state == state`, so neither the State Head nor Blueprint Head changes.
 
-`circuit(project)` derives a deterministic `CircuitVerdict` from accepted and rejected ledger facts. It can advise `continue`, `retry`, `switch_actor`, `tighten_budget`, or `halt`; it never performs that action. `schedule(project)` matches the newest accepted Patch against the active Blueprint's Workflow Rules and returns the implied actor events. It does not invoke, dispatch, retry, queue, or write anything.
+`circuit(project)` derives a deterministic `CircuitVerdict` from accepted, rejected, and failed ledger facts. It can advise `continue`, `retry`, `switch_actor`, `tighten_budget`, or `halt`; it never performs that action. `schedule(project)` matches the newest accepted Patch against the active Blueprint's Workflow Rules and returns the implied actor events. It does not invoke, dispatch, retry, queue, or write anything.
 
 The same verdict is available to a human operator:
 
@@ -175,24 +183,25 @@ This binds attribution at the MCP boundary; it is not an operating-system securi
 
 ## Model runner
 
-`kernel-run` is a separate top-level package over the public kernel interface. The kernel still never invokes a model. The runner asks a Fable 5 API Architect for a Blueprint, lets the kernel validate and install it, then submits View-bound worker Patches until the Circuit Verdict halts or the step budget is exhausted.
+`kernel-run` is a separate top-level package over the public kernel interface. The kernel still never invokes a model. The runner reuses the Blueprint already in force, or asks a Fable 5 API Architect for one when the project has none. `--compose` forces replacement through the Architect. It then submits View-bound worker Patches until the Circuit Verdict halts, two identical step failures recur, or the step budget is exhausted. Step exhaustion is reported as `halt_reason: "max_steps"` rather than normal completion.
 
 ```text
 kernel-run /path/to/project --task "Implement the accepted task" --task-id task-1
+kernel-run /path/to/project --task "Replace authority" --task-id task-1 --compose
 kernel-run /path/to/project --task "Show the proposed authority" --task-id task-1 --dry-run
 ```
 
 Worker providers:
 
 - `--provider api` is the default. It uses a bare `anthropic.Anthropic()` credential chain, `claude-opus-5`, adaptive thinking, high effort, and API token billing. The runner never prompts for a key.
-- `--provider claude-code` runs `claude -p` with JSON output and Claude Code's reported usage and cost. The Architect still uses the API provider.
+- `--provider claude-code` runs `claude -p` with JSON output and Claude Code's reported usage and cost.
 - `--provider codex` runs `codex exec` with `gpt-5.6-sol`, max reasoning, a mandatory read-only sandbox, and a JSON Patch output schema. It reports CLI token usage when available but does not guess a dollar cost.
 
 For Claude Code subscription billing, leave `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` unset and authenticate the CLI interactively. Exporting either variable routes Claude Code through API credentials instead. The runner does not branch on or rewrite the credential environment.
 
 Claude Code receives only the configured kernel MCP tool allowlist and is never launched with `--dangerously-skip-permissions`. This is a guardrail, not a security boundary: OS-level filesystem sandboxing is still required to prevent a worker process from reading or deleting `.state-tree/` through another path.
 
-Codex workers run with `--sandbox read-only` and never receive either Codex sandbox-bypass flag. Authenticate the worker account separately with `codex login`; `~/.anthropic.env` covers only the Fable 5 Architect, whose usage is billed to the Anthropic API key. Claude Fable 5 requires 30-day data retention and returns `400 invalid_request_error` for a workspace that remains under zero-data-retention, so verify that workspace setting before the first run.
+Codex workers run with `--sandbox read-only` and never receive either Codex sandbox-bypass flag. Authenticate the worker account separately with `codex login`. A seeded project needs no Anthropic credential unless `--compose` is used; `~/.anthropic.env` covers only Fable 5 Architect calls, whose usage is billed to the Anthropic API key. Claude Fable 5 requires 30-day data retention and returns `400 invalid_request_error` for a workspace that remains under zero-data-retention, so verify that workspace setting before the first composition.
 
 The result reports worker input and output tokens, provider cost when known, accepted and rejected attempts, and final State. API measurements describe this architecture directly. Claude Code measurements also include its own system prompt, tools, and project instructions.
 

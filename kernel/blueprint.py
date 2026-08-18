@@ -35,12 +35,14 @@ from .kernel import (
 from .schema import (
     SchemaError,
     _check_schema,
+    _externalize_collections,
     _hydrate_collections,
     _resolve_document_pointer,
     validate,
 )
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_MINIMUM_ACTOR_BUDGET = 256
 
 META_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -62,7 +64,10 @@ META_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                         "properties": {
                             "allow_remove": {"type": "boolean"},
-                            "budget": {"type": "integer"},
+                            "budget": {
+                                "minimum": _MINIMUM_ACTOR_BUDGET,
+                                "type": "integer",
+                            },
                             "read": {
                                 "items": {"type": "string"},
                                 "type": "array",
@@ -81,6 +86,7 @@ META_SCHEMA: dict[str, Any] = {
             "required": ["actors", "version"],
             "type": "object",
         },
+        "initial_state": {"type": "object"},
         "rules": {
             "items": {
                 "additionalProperties": False,
@@ -172,12 +178,29 @@ def set_blueprint(
         )
         next_schema = None if document is None else document["schema"]
         try:
-            validate(
-                _hydrate_collections(current, object_directory),
-                next_schema,
-            )
+            initial_state = None if document is None else document.get("initial_state")
+            if initial_state is None:
+                next_snapshot = current
+                validate(_hydrate_collections(current, object_directory), next_schema)
+            else:
+                if kernel_state["state_head"] != _GENESIS_STATE_REFERENCE:
+                    raise BlueprintError(
+                        "blueprint initial_state requires the genesis empty state"
+                    )
+                validate(initial_state, next_schema)
+                next_snapshot = _externalize_collections(
+                    initial_state, next_schema, object_directory
+                )
         except SchemaError as error:
             raise BlueprintError(str(error)) from error
+
+        try:
+            state_content = _canonical_json_bytes(next_snapshot)
+        except (TypeError, ValueError) as error:
+            raise BlueprintError(
+                "blueprint initial_state must contain canonical JSON values"
+            ) from error
+        state_reference = _store_object_at(object_directory, state_content)
 
         if document is None:
             blueprint_reference = None
@@ -195,7 +218,7 @@ def set_blueprint(
             payload_hash=payload_hash,
             metadata={},
             parent_state=kernel_state["state_head"],
-            state=kernel_state["state_head"],
+            state=state_reference,
             blueprint=blueprint_reference,
             view=None,
             blueprint_transition=True,
@@ -217,8 +240,9 @@ def check_blueprint(document: dict[str, Any] | None) -> None:
 
     if document is None:
         return
-    if not isinstance(document, dict) or document.get("version") != 2:
-        raise BlueprintError("blueprint version must be 2")
+    if not isinstance(document, dict) or document.get("version") != 3:
+        raise BlueprintError("blueprint version must be 3")
+    _check_actor_budgets(document)
     try:
         _META_VALIDATOR.validate(document)
     except ValidationError as error:
@@ -238,6 +262,21 @@ def check_blueprint(document: dict[str, Any] | None) -> None:
     _check_collection_reachability(schema, contracts)
     _check_workflow_rules(schema, contracts, document.get("rules", []))
     _check_circuit_policy(document.get("circuit", {}))
+
+
+def _check_actor_budgets(document: dict[str, Any]) -> None:
+    contracts = document.get("contracts")
+    actors = contracts.get("actors") if isinstance(contracts, dict) else None
+    if not isinstance(actors, dict):
+        return
+    for actor, rule in actors.items():
+        budget = rule.get("budget") if isinstance(rule, dict) else None
+        if type(budget) is int and budget < _MINIMUM_ACTOR_BUDGET:
+            raise BlueprintError(
+                f"contract actor {actor!r} budget must be at least "
+                f"{_MINIMUM_ACTOR_BUDGET} characters; one elision marker is "
+                "104 characters and a useful View may need two"
+            )
 
 
 def meta_schema() -> dict[str, Any]:

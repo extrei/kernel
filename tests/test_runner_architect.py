@@ -61,7 +61,7 @@ class RunnerArchitectTests(unittest.TestCase):
             project = Path(directory)
             initialize(project)
             document = {
-                "version": 2,
+                "version": 3,
                 "schema": {
                     "additionalProperties": False,
                     "properties": {"allowed": {"type": "string"}},
@@ -93,9 +93,13 @@ class RunnerArchitectTests(unittest.TestCase):
 
             self.assertEqual(result, document)
             self.assertEqual(provider.preflight_calls, 1)
-            self.assertIn("output_schema", factory.call_args.kwargs)
+            self.assertNotIn("output_schema", factory.call_args.kwargs)
             self.assertEqual(factory.call_args.kwargs["model"], "claude-fable-5")
             self.assertEqual(factory.call_args.kwargs["effort"], "xhigh")
+            self.assertNotIn("output_config", provider.calls[0])
+            self.assertIn("initial_state", provider.calls[0]["system"])
+            self.assertIn("x-kernel-collection", provider.calls[0]["system"])
+            self.assertIn("minimum is 256", provider.calls[0]["system"])
             self.assertIsNone(blueprint(project))
             self.assertEqual(entries(project), [])
 
@@ -116,7 +120,7 @@ class RunnerArchitectTests(unittest.TestCase):
     @staticmethod
     def _valid_blueprint() -> dict[str, object]:
         return {
-            "version": 2,
+            "version": 3,
             "schema": None,
             "contracts": {
                 "version": 2,

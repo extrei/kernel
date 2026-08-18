@@ -14,8 +14,12 @@ _ARCHITECT_MODEL = "claude-fable-5"
 _ARCHITECT_EFFORT = "xhigh"
 
 _SYSTEM_PROMPT = """You are the Architect for one project-local State Tree.
-Return exactly one JSON Blueprint version 2 object, with no Markdown fences or prose.
+Return exactly one JSON Blueprint version 3 object, with no Markdown fences or prose.
 The Blueprint must satisfy the supplied Meta-schema and the task.
+Include initial_state and make it satisfy the Blueprint Schema, including every
+required field. Use an empty array for every declared x-kernel-collection.
+Actor budget is measured in characters of canonical JSON. Its minimum is 256;
+512-2000 characters suits a typical actor View.
 Declare a default actor named worker. Every Workflow Rule wake actor must be declared.
 Write Contract and Workflow Rule paths must exist in the Schema when it is non-null.
 Keep the Blueprint minimal; do not include implementation instructions outside it."""
@@ -74,7 +78,6 @@ def _attempt(
         raise ValueError("attempts must be a positive integer")
     authority_schema = meta_schema()
     provider = APIProvider(
-        output_schema=authority_schema,
         model=_ARCHITECT_MODEL,
         effort=_ARCHITECT_EFFORT,
     )

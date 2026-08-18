@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum worker attempts (default: 40)",
     )
     parser.add_argument(
+        "--compose",
+        action="store_true",
+        help="replace an existing Blueprint through the Architect",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="compose and validate a Blueprint without installing it",
@@ -79,6 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             task_id=arguments.task_id,
             provider=provider,
             max_steps=arguments.max_steps,
+            compose=arguments.compose,
         )
     except (BlueprintError, ProviderError, StateTreeError, ValueError) as error:
         print(f"kernel-run: {error}", file=sys.stderr)

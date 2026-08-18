@@ -17,6 +17,7 @@ class PackageBoundaryTests(unittest.TestCase):
         self.assertTrue(callable(kernel.derive_view))
         self.assertTrue(callable(kernel.initialize))
         self.assertTrue(callable(kernel.meta_schema))
+        self.assertTrue(callable(kernel.record_failure))
         self.assertTrue(callable(kernel.record_step))
         self.assertTrue(callable(kernel.schedule))
         self.assertTrue(callable(kernel.schema))

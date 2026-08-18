@@ -40,12 +40,12 @@ def circuit(project_root: str | Path) -> CircuitVerdict:
     current_blueprint = _entry_blueprint(object_directory, ledger_entries)
     rejection_threshold, cycle_window = _policy(current_blueprint)
 
-    rejection_actor, rejection_count = _consecutive_rejections(
+    attempt_kind, rejection_actor, rejection_count = _consecutive_failures(
         ledger_entries, object_directory
     )
     cycle_state = _cycle_state(ledger_entries, cycle_window)
     no_op_sequences = _no_op_sequences(ledger_entries, cycle_window)
-    repeated_actor, repeated_hash, repeated_count = _repeated_payload(
+    repeated_actor, repeated_hash, repeated_count, repeated_kind = _repeated_payload(
         ledger_entries, object_directory, cycle_window
     )
     signals = {
@@ -70,11 +70,21 @@ def circuit(project_root: str | Path) -> CircuitVerdict:
     if cycle_state is not None:
         return CircuitVerdict("halt", "state cycle detected", signals)
     if repeated_count > 1:
-        return CircuitVerdict("halt", "actor repeated an identical payload", signals)
+        reason = (
+            "actor repeated an identical failure"
+            if repeated_kind == "failure"
+            else "actor repeated an identical payload"
+        )
+        return CircuitVerdict("halt", reason, signals)
     if rejection_count >= rejection_threshold:
+        reason = (
+            "actor reached the consecutive failure threshold"
+            if attempt_kind == "failure"
+            else "actor reached the consecutive rejection threshold"
+        )
         return CircuitVerdict(
             "switch_actor",
-            "actor reached the consecutive rejection threshold",
+            reason,
             signals,
         )
     if no_op_sequences:
@@ -82,7 +92,12 @@ def circuit(project_root: str | Path) -> CircuitVerdict:
             "tighten_budget", "accepted patch did not advance state", signals
         )
     if rejection_count:
-        return CircuitVerdict("retry", "latest actor attempt was rejected", signals)
+        reason = (
+            "latest actor attempt failed before kernel evaluation"
+            if attempt_kind == "failure"
+            else "latest actor attempt was rejected"
+        )
+        return CircuitVerdict("retry", reason, signals)
     return CircuitVerdict("continue", "no circuit signal requires intervention", signals)
 
 
@@ -163,22 +178,27 @@ def _policy(blueprint: dict[str, Any] | None) -> tuple[int, int]:
     )
 
 
-def _consecutive_rejections(
+def _consecutive_failures(
     ledger_entries: list[dict[str, Any]], object_directory: Path
-) -> tuple[str | None, int]:
+) -> tuple[str | None, str | None, int]:
+    attempt_kind: str | None = None
     actor: str | None = None
     count = 0
     for entry in reversed(ledger_entries):
-        if entry["kind"] != "rejection":
+        if entry["kind"] not in {"failure", "rejection"}:
             break
-        if _rejection_stage(object_directory, entry) == "stale_parent":
+        if (
+            entry["kind"] == "rejection"
+            and _rejection_stage(object_directory, entry) == "stale_parent"
+        ):
             continue
         if actor is None:
             actor = entry["actor"]
+            attempt_kind = entry["kind"]
         if entry["actor"] != actor:
             break
         count += 1
-    return actor, count
+    return attempt_kind, actor, count
 
 
 def _cycle_state(
@@ -217,24 +237,27 @@ def _repeated_payload(
     ledger_entries: list[dict[str, Any]],
     object_directory: Path,
     cycle_window: int,
-) -> tuple[str | None, str | None, int]:
+) -> tuple[str | None, str | None, int, str | None]:
     candidates = []
+    kinds: dict[tuple[str, str], str] = {}
     for entry in ledger_entries[-cycle_window:]:
         if (
             entry["kind"] == "rejection"
             and _rejection_stage(object_directory, entry) == "stale_parent"
         ):
             continue
-        candidates.append((entry["actor"], entry["payload_hash"]))
+        key = (entry["actor"], entry["payload_hash"])
+        candidates.append(key)
+        kinds[key] = entry["kind"]
     counts = Counter(candidates)
     if not counts:
-        return None, None, 0
+        return None, None, 0, None
     (actor, payload_hash), count = min(
         counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1])
     )
     if count < 2:
-        return None, None, 0
-    return actor, payload_hash, count
+        return None, None, 0, None
+    return actor, payload_hash, count, kinds[(actor, payload_hash)]
 
 
 def _rejection_stage(

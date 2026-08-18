@@ -281,7 +281,7 @@ class SchemaTests(unittest.TestCase):
             actor=actor,
             task_id=task_id,
             blueprint={
-                "version": 2,
+                "version": 3,
                 "schema": schema,
                 "contracts": {
                     "version": 2,

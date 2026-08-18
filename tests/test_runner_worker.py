@@ -4,16 +4,19 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from kernel import (
+    ViewError,
     apply_patch,
     circuit,
     entries,
     initialize,
+    read_artifact,
     set_blueprint,
     state,
 )
-from runner.providers import Completion
+from runner.providers import Completion, ProviderError
 from runner.worker import step
 
 
@@ -41,7 +44,92 @@ class _FakeProvider:
         return Completion(next(self.texts), 11, 7, 0.001)
 
 
+class _FailingProvider:
+    name = "failing"
+
+    def preflight(self) -> None:
+        return None
+
+    def complete(self, **arguments: object) -> Completion:
+        raise ProviderError("provider unavailable")
+
+
 class RunnerWorkerTests(unittest.TestCase):
+    def test_view_failure_is_recorded_before_provider_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            provider = _FakeProvider([])
+
+            with patch("runner.worker.view", side_effect=ViewError("view too large")):
+                result = step(
+                    project,
+                    actor="worker",
+                    task_id="view-failure",
+                    task="work",
+                    provider=provider,
+                )
+
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["error_type"], "ViewError")
+            self.assertEqual(provider.calls, [])
+            self.assertEqual(entries(project)[-1]["kind"], "failure")
+            self.assertEqual(self._last_payload(project)["stage"], "view")
+
+    def test_provider_and_parse_failures_are_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            set_blueprint(
+                project,
+                actor="architect",
+                task_id="runner-failures",
+                blueprint=self._blueprint({"worker": {"read": [], "write": []}}),
+            )
+
+            provider_result = step(
+                project,
+                actor="worker",
+                task_id="runner-failures",
+                task="work",
+                provider=_FailingProvider(),
+            )
+            self.assertEqual(provider_result["error_type"], "ProviderError")
+            self.assertEqual(self._last_payload(project)["stage"], "provider")
+
+            parse_result = step(
+                project,
+                actor="worker",
+                task_id="runner-failures",
+                task="work",
+                provider=_FakeProvider(["not-json"]),
+            )
+            self.assertEqual(parse_result["error_type"], "JSONDecodeError")
+            self.assertEqual(self._last_payload(project)["stage"], "parse")
+
+    def test_failure_recording_never_masks_the_original_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+
+            with (
+                patch("runner.worker.view", side_effect=ViewError("original view")),
+                patch(
+                    "runner.worker.record_failure",
+                    side_effect=RuntimeError("secondary ledger error"),
+                ),
+            ):
+                result = step(
+                    project,
+                    actor="worker",
+                    task_id="best-effort-failure",
+                    task="work",
+                    provider=_FakeProvider([]),
+                )
+
+            self.assertEqual(result["error_type"], "ViewError")
+            self.assertEqual(result["error"], "original view")
+            self.assertNotIn("secondary", result["error"])
     def test_refusal_is_relayed_and_appears_in_the_next_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -147,7 +235,7 @@ class RunnerWorkerTests(unittest.TestCase):
     @staticmethod
     def _blueprint(actors: dict[str, object]) -> dict[str, object]:
         return {
-            "version": 2,
+            "version": 3,
             "schema": None,
             "contracts": {"version": 2, "actors": actors},
         }
@@ -157,6 +245,11 @@ class RunnerWorkerTests(unittest.TestCase):
         return json.loads(
             (project / ".state-tree" / "kernel.json").read_text(encoding="utf-8")
         )
+
+    @staticmethod
+    def _last_payload(project: Path) -> dict[str, object]:
+        entry = entries(project)[-1]
+        return json.loads(read_artifact(project, entry["payload_hash"]))
 
 
 if __name__ == "__main__":

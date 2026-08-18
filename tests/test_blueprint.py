@@ -17,6 +17,7 @@ from kernel import (
     blueprint,
     check_blueprint,
     contracts,
+    entries,
     meta_schema,
     schema,
     set_blueprint,
@@ -70,10 +71,114 @@ class BlueprintTests(unittest.TestCase):
             self.assertEqual(schema(project), definition["schema"])
             self.assertEqual(contracts(project), definition["contracts"])
 
+    def test_initial_state_seeds_genesis_in_the_blueprint_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            initial = {
+                "draft": "",
+                "review_notes": [],
+                "status": "planning",
+            }
+            definition = self._required_blueprint(initial)
+            genesis = self._kernel_state(project)["state_head"]
+
+            record = set_blueprint(
+                project,
+                actor="architect",
+                task_id="seed-genesis",
+                blueprint=definition,
+            )
+
+            kernel_state = self._kernel_state(project)
+            entry = entries(project)[0]
+            self.assertEqual(state(project), initial)
+            self.assertEqual(kernel_state["revision"], 1)
+            self.assertEqual(kernel_state["blueprint_head"], record.blueprint)
+            self.assertEqual(kernel_state["ledger_head"], record.entry_hash)
+            self.assertEqual(kernel_state["state_head"], entry["state"])
+            self.assertEqual(entry["kind"], "blueprint")
+            self.assertEqual(entry["parent_state"], genesis)
+            self.assertNotEqual(entry["parent_state"], entry["state"])
+            self.assertEqual(verify(project, strict=True), record.entry_hash)
+
+    def test_required_genesis_without_initial_state_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            before_state = self._kernel_state(project)
+            before_objects = self._object_names(project)
+            definition = self._required_blueprint()
+
+            with self.assertRaisesRegex(BlueprintError, "violates schema"):
+                set_blueprint(
+                    project,
+                    actor="architect",
+                    task_id="missing-seed",
+                    blueprint=definition,
+                )
+
+            self.assertEqual(self._kernel_state(project), before_state)
+            self.assertEqual(self._object_names(project), before_objects)
+
+    def test_invalid_initial_state_stores_nothing_and_moves_no_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            before_state = self._kernel_state(project)
+            before_objects = self._object_names(project)
+            definition = self._required_blueprint(
+                {"draft": "", "review_notes": [], "status": 7}
+            )
+
+            with self.assertRaisesRegex(BlueprintError, "violates schema"):
+                set_blueprint(
+                    project,
+                    actor="architect",
+                    task_id="invalid-seed",
+                    blueprint=definition,
+                )
+
+            self.assertEqual(self._kernel_state(project), before_state)
+            self.assertEqual(self._object_names(project), before_objects)
+
+    def test_initial_state_cannot_overwrite_nonempty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            genesis = self._kernel_state(project)["state_head"]
+            apply_patch(
+                project,
+                actor="setup",
+                task_id="existing-work",
+                parent_state=genesis,
+                patch=[{"op": "add", "path": "/work", "value": True}],
+            )
+            before_state = self._kernel_state(project)
+            before_objects = self._object_names(project)
+
+            with self.assertRaisesRegex(BlueprintError, "genesis empty state"):
+                set_blueprint(
+                    project,
+                    actor="architect",
+                    task_id="existing-work",
+                    blueprint=self._required_blueprint(
+                        {
+                            "draft": "",
+                            "review_notes": [],
+                            "status": "planning",
+                        }
+                    ),
+                )
+
+            self.assertEqual(state(project), {"work": True})
+            self.assertEqual(self._kernel_state(project), before_state)
+            self.assertEqual(self._object_names(project), before_objects)
+
     def test_meta_schema_rejects_structure_before_semantic_checks(self) -> None:
         malformed = self._blueprint(
             {"type": "not-a-json-schema-type"},
-            {"bad actor": {"budget": 0}},
+            {"bad actor": {"budget": 256}},
         )
         malformed["unexpected"] = True
 
@@ -89,7 +194,59 @@ class BlueprintTests(unittest.TestCase):
         self.assertIn("contracts", second["properties"])
         self.assertIn("rules", second["properties"])
         self.assertIn("circuit", second["properties"])
+        self.assertIn("initial_state", second["properties"])
         Draft202012Validator.check_schema(second)
+
+    def test_actor_budget_floor_rejects_the_flight_blueprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            definition = self._required_blueprint(
+                {"draft": "", "review_notes": [], "status": "planning"}
+            )
+            definition["contracts"]["actors"]["worker"]["budget"] = 8
+
+            with self.assertRaisesRegex(
+                BlueprintError, "at least 256 characters.*elision marker"
+            ):
+                set_blueprint(
+                    project,
+                    actor="architect",
+                    task_id="flight-budget",
+                    blueprint=definition,
+                )
+
+            self.assertEqual(entries(project), [])
+            self.assertEqual(state(project), {})
+
+    def test_actor_budget_floor_is_in_the_meta_schema_and_accepts_256(self) -> None:
+        definition = self._blueprint(
+            None,
+            {"worker": {"budget": 256, "read": [], "write": []}},
+        )
+        check_blueprint(definition)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            set_blueprint(
+                project,
+                actor="architect",
+                task_id="minimum-budget",
+                blueprint=definition,
+            )
+            self.assertEqual(blueprint(project), definition)
+
+        too_small = self._blueprint(
+            None,
+            {"worker": {"budget": 255, "read": [], "write": []}},
+        )
+        validator = Draft202012Validator(meta_schema())
+        self.assertFalse(validator.is_valid(too_small))
+        self.assertEqual(
+            meta_schema()["properties"]["contracts"]["properties"]["actors"]
+            ["additionalProperties"]["properties"]["budget"]["minimum"],
+            256,
+        )
 
     def test_schema_cannot_drop_a_path_still_granted_by_contracts(self) -> None:
         definition = self._blueprint(
@@ -109,11 +266,11 @@ class BlueprintTests(unittest.TestCase):
         with self.assertRaisesRegex(BlueprintError, "absent from schema"):
             check_blueprint(definition)
 
-    def test_blueprint_v1_is_rejected(self) -> None:
+    def test_blueprint_v2_is_rejected(self) -> None:
         definition = self._blueprint(None, {})
-        definition["version"] = 1
+        definition["version"] = 2
 
-        with self.assertRaisesRegex(BlueprintError, "version must be 2"):
+        with self.assertRaisesRegex(BlueprintError, "version must be 3"):
             check_blueprint(definition)
 
     def test_workflow_rule_requires_declared_wake_actor_and_schema_path(self) -> None:
@@ -426,13 +583,34 @@ class BlueprintTests(unittest.TestCase):
             "type": "object",
         }
 
+    @classmethod
+    def _required_blueprint(
+        cls, initial_state: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        definition = cls._blueprint(
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "draft": {"type": "string"},
+                    "review_notes": {"type": "array"},
+                    "status": {"type": "string"},
+                },
+                "required": ["status", "draft", "review_notes"],
+                "type": "object",
+            },
+            {"worker": {"read": [], "write": []}},
+        )
+        if initial_state is not None:
+            definition["initial_state"] = initial_state
+        return definition
+
     @staticmethod
     def _blueprint(
         schema: dict[str, object] | None,
         actors: dict[str, object],
     ) -> dict[str, object]:
         return {
-            "version": 2,
+            "version": 3,
             "schema": schema,
             "contracts": {"version": 2, "actors": actors},
         }

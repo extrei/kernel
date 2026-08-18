@@ -229,10 +229,8 @@ def _append_ledger_entry_locked(
         raise StateTreeError(
             "ledger blueprint does not match the current blueprint head"
         )
-    if blueprint_transition and (kind != "blueprint" or parent_state != state):
-        raise StateTreeError(
-            "blueprint transitions must be unchanged-state blueprint entries"
-        )
+    if blueprint_transition and kind != "blueprint":
+        raise StateTreeError("blueprint transitions must use blueprint entries")
 
     object_directory = _object_directory(state_tree)
     payload_digest = _digest_from_reference(payload_hash, label="payload")

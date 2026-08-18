@@ -413,7 +413,7 @@ class ContractTests(unittest.TestCase):
         schema: dict[str, object] | None,
         contracts: dict[str, object],
     ) -> dict[str, object]:
-        return {"version": 2, "schema": schema, "contracts": contracts}
+        return {"version": 3, "schema": schema, "contracts": contracts}
 
     @classmethod
     def _install_contract_blueprint(

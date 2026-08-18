@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from kernel import apply_patch, initialize, set_blueprint
+from kernel import ViewError, apply_patch, entries, initialize, set_blueprint
 from runner.loop import run
 from runner.providers import Completion
 
@@ -43,7 +43,10 @@ class RunnerLoopTests(unittest.TestCase):
             refused = [{"op": "add", "path": "/blocked", "value": True}]
             provider = _FakeProvider([refused, refused])
 
-            with patch("runner.loop.install", return_value=authority):
+            with patch(
+                "runner.loop.install",
+                side_effect=AssertionError("existing Blueprint must be reused"),
+            ):
                 result = run(
                     project,
                     "write result",
@@ -53,7 +56,9 @@ class RunnerLoopTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["steps"], 2)
-            self.assertEqual(result["halt_reason"], "actor repeated an identical payload")
+            self.assertEqual(
+                result["halt_reason"], "runner repeated an identical failure"
+            )
             self.assertEqual(result["tokens"]["input_tokens"], 20)
             self.assertEqual(result["tokens"]["output_tokens"], 10)
             self.assertEqual(result["cost_usd"], 0.02)
@@ -99,7 +104,10 @@ class RunnerLoopTests(unittest.TestCase):
                 ]
             )
 
-            with patch("runner.loop.install", return_value=authority):
+            with patch(
+                "runner.loop.install",
+                side_effect=AssertionError("existing Blueprint must be reused"),
+            ):
                 result = run(
                     project,
                     "run scheduled work",
@@ -113,6 +121,112 @@ class RunnerLoopTests(unittest.TestCase):
                 ["worker", "verifier"],
             )
             self.assertEqual(result["final_state"], {"review": 1, "task": 1})
+            self.assertEqual(result["halt_reason"], "max_steps")
+
+    def test_two_identical_runner_failures_halt_without_provider_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            authority = self._blueprint(
+                {"worker": {"read": [], "write": []}}
+            )
+            set_blueprint(
+                project,
+                actor="architect",
+                task_id="runner-failure-loop",
+                blueprint=authority,
+            )
+            provider = _FakeProvider([])
+
+            with patch("runner.worker.view", side_effect=ViewError("view failed")):
+                result = run(
+                    project,
+                    "work",
+                    task_id="runner-failure-loop",
+                    provider=provider,
+                    max_steps=6,
+                )
+
+            self.assertEqual(result["steps"], 2)
+            self.assertEqual(
+                result["halt_reason"], "runner repeated an identical failure"
+            )
+            self.assertEqual(provider.calls, [])
+            self.assertEqual([entry["kind"] for entry in entries(project)[-2:]], [
+                "failure",
+                "failure",
+            ])
+
+    def test_runner_guard_halts_when_failure_recording_also_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            authority = self._blueprint(
+                {"worker": {"read": [], "write": []}}
+            )
+            set_blueprint(
+                project,
+                actor="architect",
+                task_id="ledger-failure-loop",
+                blueprint=authority,
+            )
+            provider = _FakeProvider([])
+
+            with (
+                patch("runner.worker.view", side_effect=ViewError("view failed")),
+                patch(
+                    "runner.worker.record_failure",
+                    side_effect=RuntimeError("ledger unavailable"),
+                ),
+            ):
+                result = run(
+                    project,
+                    "work",
+                    task_id="ledger-failure-loop",
+                    provider=provider,
+                    max_steps=6,
+                )
+
+            self.assertEqual(result["steps"], 2)
+            self.assertEqual(
+                result["halt_reason"], "runner repeated an identical failure"
+            )
+            self.assertEqual(provider.calls, [])
+            self.assertEqual([entry["kind"] for entry in entries(project)], [
+                "blueprint"
+            ])
+
+    def test_compose_replaces_an_existing_blueprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            authority = self._blueprint(
+                {"worker": {"read": [], "write": ["/result"]}}
+            )
+            set_blueprint(
+                project,
+                actor="architect",
+                task_id="compose-loop",
+                blueprint=authority,
+            )
+            provider = _FakeProvider(
+                [[{"op": "add", "path": "/result", "value": True}]]
+            )
+
+            with patch("runner.loop.install", return_value=authority) as install:
+                result = run(
+                    project,
+                    "replace authority",
+                    task_id="compose-loop",
+                    provider=provider,
+                    max_steps=1,
+                    compose=True,
+                )
+
+            install.assert_called_once_with(
+                project, "replace authority", task_id="compose-loop"
+            )
+            self.assertEqual(result["steps"], 1)
 
     @staticmethod
     def _blueprint(
@@ -121,7 +235,7 @@ class RunnerLoopTests(unittest.TestCase):
         rules: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         document: dict[str, object] = {
-            "version": 2,
+            "version": 3,
             "schema": None,
             "contracts": {"version": 2, "actors": actors},
         }

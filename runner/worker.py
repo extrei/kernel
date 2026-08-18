@@ -16,10 +16,11 @@ from kernel import (
     apply_patch,
     entries,
     read_artifact,
+    record_failure,
     view,
 )
 
-from .providers import Completion, JSON_PATCH_OUTPUT_SCHEMA, Provider
+from .providers import Completion, JSON_PATCH_OUTPUT_SCHEMA, Provider, ProviderError
 
 _SYSTEM_PROMPT = """You are one worker in a project-local State Tree.
 Return exactly one JSON Patch array with no Markdown fences or prose.
@@ -50,28 +51,61 @@ def step(
     try:
         record = view(project_root, actor=actor)
     except _KERNEL_FAILURES as error:
-        return _failure(actor, error, completion=None, state=None, view_hash=None)
+        return _runner_failure(
+            project_root,
+            actor=actor,
+            task_id=task_id,
+            stage="view",
+            error=error,
+            completion=None,
+            state=None,
+            view_hash=None,
+        )
 
-    completion = provider.complete(
-        system=_SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "actor": actor,
-                        "recent_refusals": _recent_refusals(project_root),
-                        "task": task,
-                        "view": record.document,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-            }
-        ],
-    )
-    patch = _decode_candidate(completion.text)
+    try:
+        completion = provider.complete(
+            system=_SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "actor": actor,
+                            "recent_refusals": _recent_refusals(project_root),
+                            "task": task,
+                            "view": record.document,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                }
+            ],
+        )
+    except ProviderError as error:
+        return _runner_failure(
+            project_root,
+            actor=actor,
+            task_id=task_id,
+            stage="provider",
+            error=error,
+            completion=None,
+            state=record.state,
+            view_hash=record.view_hash,
+        )
+    try:
+        patch = _decode_candidate(completion.text)
+    except json.JSONDecodeError as error:
+        return _runner_failure(
+            project_root,
+            actor=actor,
+            task_id=task_id,
+            stage="parse",
+            error=error,
+            completion=completion,
+            state=record.state,
+            view_hash=record.view_hash,
+        )
     try:
         accepted = apply_patch(
             project_root,
@@ -135,10 +169,38 @@ def _recent_refusals(
 
 
 def _decode_candidate(text: str) -> Any:
+    return json.loads(text)
+
+
+def _runner_failure(
+    project_root: str | Path,
+    *,
+    actor: str,
+    task_id: str,
+    stage: str,
+    error: Exception,
+    completion: Completion | None,
+    state: str | None,
+    view_hash: str | None,
+) -> dict[str, Any]:
+    reason = str(error) or type(error).__name__
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
+        record_failure(
+            project_root,
+            actor=actor,
+            task_id=task_id,
+            stage=stage,
+            reason=reason,
+        )
+    except Exception:
+        pass
+    return _failure(
+        actor,
+        error,
+        completion=completion,
+        state=state,
+        view_hash=view_hash,
+    )
 
 
 def _failure(

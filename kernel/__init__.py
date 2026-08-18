@@ -26,7 +26,7 @@ from .kernel import (
     initialize,
     verify,
 )
-from .state import PatchRecord, StaleParentError, apply_patch, state
+from .state import PatchRecord, StaleParentError, apply_patch, record_failure, state
 from .schema import (
     SchemaError,
     audit_schema,
@@ -77,6 +77,7 @@ __all__ = [
     "initialize",
     "meta_schema",
     "read_artifact",
+    "record_failure",
     "record_step",
     "schedule",
     "schema",

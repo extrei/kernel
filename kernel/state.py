@@ -11,6 +11,7 @@ from .blueprint import _blueprint_authorities, _read_blueprint_object
 from .contracts import UnauthorizedWriteError, authorize
 from .jsonpatch import PatchError, apply_patch as apply_json_patch, touched_paths
 from .kernel import (
+    LedgerAppend,
     STATE_TREE_DIRECTORY,
     StateTreeError,
     _append_ledger_entry_locked,
@@ -39,6 +40,9 @@ from .views import (
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _KIND = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+_FAILURE_STAGES = {"parse", "provider", "view"}
+_RESERVED_KINDS = {"blueprint", "failure", "rejection"}
+_FAILURE_VERSION = 1
 _REJECTION_VERSION = 1
 
 
@@ -74,6 +78,49 @@ def state(project_root: str | Path, *, at: str | None = None) -> dict[str, Any]:
     )
 
 
+def record_failure(
+    project_root: str | Path,
+    *,
+    actor: str,
+    task_id: str,
+    stage: str,
+    reason: str,
+) -> LedgerAppend:
+    """Record a runner failure that occurred before kernel patch evaluation."""
+
+    _validate_identifier(actor, label="actor")
+    _validate_identifier(task_id, label="task id")
+    if stage not in _FAILURE_STAGES:
+        raise StateTreeError("failure stage must be parse, provider, or view")
+    if not isinstance(reason, str) or not reason:
+        raise StateTreeError("failure reason must be a non-empty string")
+
+    root = _resolve_project_root(project_root)
+    state_tree = root / STATE_TREE_DIRECTORY
+    with _kernel_lock(state_tree):
+        kernel_state = _validated_kernel_state(state_tree)
+        payload_hash = _store_object_at(
+            _object_directory(state_tree),
+            _canonical_json_bytes(
+                {"reason": reason, "stage": stage, "version": _FAILURE_VERSION}
+            ),
+        )
+        current_state = kernel_state["state_head"]
+        return _append_ledger_entry_locked(
+            state_tree,
+            kernel_state,
+            actor=actor,
+            kind="failure",
+            task_id=task_id,
+            payload_hash=payload_hash,
+            metadata={},
+            parent_state=current_state,
+            state=current_state,
+            blueprint=kernel_state["blueprint_head"],
+            view=None,
+        )
+
+
 def apply_patch(
     project_root: str | Path,
     *,
@@ -92,6 +139,8 @@ def apply_patch(
         raise PatchError(
             "kind must be 1-32 letters, digits, dots, hyphens, or underscores"
         )
+    if kind in _RESERVED_KINDS:
+        raise PatchError(f"kind {kind!r} is reserved for kernel records")
     root = _resolve_project_root(project_root)
     state_tree = root / STATE_TREE_DIRECTORY
     with _kernel_lock(state_tree):

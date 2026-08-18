@@ -241,7 +241,7 @@ class RejectionRecordTests(unittest.TestCase):
         actors: dict[str, object],
     ) -> dict[str, object]:
         return {
-            "version": 2,
+            "version": 3,
             "schema": schema,
             "contracts": {"version": 2, "actors": actors},
         }

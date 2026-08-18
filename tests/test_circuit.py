@@ -14,6 +14,7 @@ from kernel import (
     apply_patch,
     circuit,
     events,
+    record_failure,
     schedule,
     set_blueprint,
 )
@@ -75,6 +76,52 @@ class CircuitTests(unittest.TestCase):
                 verdict.signals["consecutive_rejections"],
                 {"actor": "worker", "count": 2, "threshold": 2},
             )
+
+    def test_failure_entries_count_and_are_named_by_the_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            record_failure(
+                project,
+                actor="worker",
+                task_id="failure-circuit",
+                stage="view",
+                reason="first view failure",
+            )
+            record_failure(
+                project,
+                actor="worker",
+                task_id="failure-circuit",
+                stage="view",
+                reason="second view failure",
+            )
+
+            verdict = circuit(project)
+
+            self.assertEqual(verdict.action, "switch_actor")
+            self.assertIn("failure", verdict.reason)
+            self.assertEqual(
+                verdict.signals["consecutive_rejections"],
+                {"actor": "worker", "count": 2, "threshold": 2},
+            )
+
+    def test_identical_failure_payloads_have_a_failure_specific_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            for _ in range(2):
+                record_failure(
+                    project,
+                    actor="worker",
+                    task_id="repeated-failure",
+                    stage="provider",
+                    reason="provider unavailable",
+                )
+
+            verdict = circuit(project)
+
+            self.assertEqual(verdict.action, "halt")
+            self.assertEqual(verdict.reason, "actor repeated an identical failure")
 
     def test_blueprint_circuit_policy_overrides_both_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -312,7 +359,7 @@ class CircuitTests(unittest.TestCase):
         rules: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         document: dict[str, object] = {
-            "version": 2,
+            "version": 3,
             "schema": schema,
             "contracts": {"version": 2, "actors": actors},
         }
