@@ -1,0 +1,15 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "[{\"op\":\"add\",\"path\":\"/status\",\"value\":\"done\"}]",
+  "usage": {
+    "input_tokens": 13,
+    "output_tokens": 7,
+    "cache_read_input_tokens": 11
+  },
+  "total_cost_usd": 0.0123,
+  "num_turns": 1,
+  "permission_denials": [],
+  "stop_reason": "end_turn"
+}

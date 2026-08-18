@@ -4,15 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-kernel"
-version = "0.6.0"
+version = "0.7.0"
 description = "A local project kernel for human-approved agent work."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["jsonschema>=4,<5", "mcp>=2,<3"]
+dependencies = ["anthropic>=0.70", "jsonschema>=4,<5", "mcp>=2,<3"]
 
 [project.scripts]
 state-tree = "kernel.cli:main"
 kernel-mcp = "kernel.mcp:main"
+kernel-run = "runner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["kernel*"]
+include = ["kernel*", "runner*"]
