@@ -14,10 +14,9 @@ from .kernel import (
     StateTreeError,
     _append_ledger_entry_locked,
     _canonical_json_bytes,
-    _digest_from_reference,
     _kernel_lock,
     _object_directory,
-    _read_hashed_object,
+    _read_json_mapping_object,
     _read_snapshot_object,
     _resolve_project_root,
     _store_object_at,
@@ -28,6 +27,13 @@ from .schema import (
     _hydrate_collections,
     _read_schema_object,
     validate,
+)
+from .views import (
+    StaleViewError,
+    ViewError,
+    _view_reference,
+    _view_required,
+    derive_view,
 )
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -105,24 +111,48 @@ def apply_patch(
             operation == "remove" for operation, _ in patch_paths
         )
 
-        current = _read_snapshot_object(
+        schema_reference = kernel_state["schema_head"]
+        current_schema = _read_schema_object(object_directory, schema_reference)
+        stored_current = _read_snapshot_object(
             object_directory, parent_state, label="parent state"
         )
-        current = _hydrate_collections(current, object_directory)
+        if current_contract is not None:
+            if view is None and _view_required(current_contract, actor):
+                raise ViewError("active contract budget requires a view")
+            if view is not None:
+                expected_view = _view_reference(
+                    derive_view(
+                        stored_current,
+                        current_contract,
+                        current_schema,
+                        actor,
+                    )
+                )
+                if view != expected_view:
+                    raise StaleViewError(
+                        "supplied view does not match the current parent state"
+                    )
+                try:
+                    _read_json_mapping_object(
+                        object_directory, view, label="view"
+                    )
+                except StateTreeError as error:
+                    raise StaleViewError(
+                        "supplied view object is unavailable or invalid"
+                    ) from error
+        elif view is not None:
+            _read_json_mapping_object(object_directory, view, label="view")
+
+        current = _hydrate_collections(stored_current, object_directory)
         next_snapshot = apply_json_patch(current, patch, allow_remove=allow_remove)
         if not isinstance(next_snapshot, dict):
             raise PatchError("state snapshot must remain a JSON object")
 
-        schema_reference = kernel_state["schema_head"]
-        current_schema = _read_schema_object(object_directory, schema_reference)
         validate(next_snapshot, current_schema)
         stored_snapshot = _externalize_collections(
             next_snapshot, current_schema, object_directory
         )
 
-        if view is not None:
-            view_digest = _digest_from_reference(view, label="view")
-            _read_hashed_object(object_directory, view_digest, label="view")
         try:
             patch_content = _canonical_json_bytes(patch)
             state_content = _canonical_json_bytes(stored_snapshot)

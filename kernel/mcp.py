@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from typing import Any
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
@@ -17,6 +18,7 @@ from mcp.types import ToolAnnotations
 from .controller import read_artifact as read_artifact_bytes
 from .controller import record_step
 from .kernel import StateTreeError, verify
+from .views import view as derive_actor_view
 
 PROJECT_ENVIRONMENT_VARIABLE = "KERNEL_PROJECT"
 ACTOR_ENVIRONMENT_VARIABLE = "KERNEL_ACTOR"
@@ -25,8 +27,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SERVER_INSTRUCTIONS = (
     "This server is bound to one project-local kernel and one agent "
     "identity. Submit finished project steps with submit_step and share their "
-    "content hashes with other agents through read_artifact. The actor identity "
-    "is fixed when the server starts and must never come from a tool argument."
+    "content hashes with other agents through read_artifact. Read the bound "
+    "actor's current state slice with get_view. The actor identity is fixed when "
+    "the server starts and must never come from a tool argument."
 )
 
 
@@ -77,6 +80,27 @@ def create_server(
             "actor": current.actor,
             "ledger_head": verify(current.project_root),
             "project_root": str(current.project_root),
+        }
+
+    @server.tool(
+        title="Get actor view",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    def get_view() -> dict[str, Any]:
+        """Return the current View for this server's launch-bound actor."""
+
+        current = binding()
+        record = derive_actor_view(
+            current.project_root,
+            actor=current.actor,
+        )
+        return {
+            "actor": record.actor,
+            "contracts": record.contracts,
+            "document": record.document,
+            "schema": record.schema,
+            "state": record.state,
+            "view_hash": record.view_hash,
         }
 
     @server.tool(

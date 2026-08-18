@@ -79,9 +79,17 @@ When a schema marks an array with `"x-kernel-collection": true`, the persisted S
 
 The exact one-key `$collection` object is reserved for this reference form.
 
-`set_contracts(...)` places actor-specific path grants in force. `add`, `replace`, and `remove` require a matching `write` pattern; `test` requires a matching `read` pattern. Patterns match complete JSON Pointer segments, so `/plan` does not grant `/plan/status`, while `/plan/*` grants exactly one child segment. An active contract rejects actors it does not name.
+`set_contracts(...)` places a version 2 actor-specific contract in force. `add`, `replace`, and `remove` require a matching `write` pattern; `test` requires a matching `read` pattern. Patterns match complete JSON Pointer segments, so `/plan` does not grant `/plan/status`, while `/plan/*` grants exactly one child segment. An active contract rejects actors it does not name.
 
 With no contract in force, non-removal patches remain allowed and `remove` fails closed. Authorization runs before collection hydration, patch evaluation, schema validation, or object storage. `verify(...)` checks contract objects structurally; `audit_contracts(...)` is the explicit human audit of historical patch authority.
+
+An actor rule may set a positive `budget`, measured in characters of canonical JSON. `view(project, actor=...)` derives and stores that actor's deterministic subdocument from the current Snapshot, Write Contract, and Schema. Visible schema fragments appear under `$schema`; Collection references remain opaque handles.
+
+When a View exceeds its budget, large visible entries are replaced deterministically with `{"$elided":{"bytes":N,"hash":"sha256:…"}}`. The hash resolves to the canonical original value through the existing object read path. If even the elided form cannot fit, View derivation fails.
+
+The exact one-key `$elided` object is reserved for this View reference form.
+
+A budgeted actor must pass the derived View hash to `apply_patch(...)`. The kernel re-derives it from `parent_state` before hydration or patch evaluation; a mismatch raises `StaleViewError`. Unbudgeted contracts may omit the View, but any supplied contracted View is still checked. `verify(...)` remains structural, while `audit_views(...)` explicitly re-evaluates historical View bindings.
 
 Normal verification may reuse `.state-tree/cache/verified`; malformed, missing, or mismatched checkpoints fall back to genesis verification. `verify(project, strict=True)` always ignores the checkpoint. Deleting `.state-tree/cache/` is always safe.
 
@@ -100,8 +108,9 @@ Each line contains: sequence, timestamp, actor, kind, task ID, and payload hash.
 
 ## Local MCP server
 
-`kernel-mcp` exposes three tools over stdio:
+`kernel-mcp` exposes four tools over stdio:
 
+- `get_view`
 - `kernel_status`
 - `submit_step`
 - `read_artifact`

@@ -250,8 +250,7 @@ def _append_ledger_entry_locked(
     if contracts is not None:
         _read_json_mapping_object(object_directory, contracts, label="contracts")
     if view is not None:
-        view_digest = _digest_from_reference(view, label="view")
-        _read_hashed_object(object_directory, view_digest, label="view")
+        _read_json_mapping_object(object_directory, view, label="view")
 
     sequence = kernel_state["revision"] + 1
     previous_digest = _digest_from_reference(
@@ -536,10 +535,9 @@ def _validate_ledger_entry(
         )
     view = entry.get("view")
     if view is not None:
-        view_digest = _digest_from_reference(view, label="view")
-        _read_hashed_object(
+        _read_json_mapping_object(
             object_directory,
-            view_digest,
+            view,
             label=f"ledger sequence {expected_sequence} view",
         )
     payload_digest = _digest_from_reference(entry.get("payload_hash"), label="payload")

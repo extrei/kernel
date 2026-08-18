@@ -171,7 +171,7 @@ class ContractTests(unittest.TestCase):
                 patch=[{"op": "add", "path": "/task", "value": "qk-14"}],
             )
             definition = {
-                "version": 1,
+                "version": 2,
                 "actors": {"verifier": {"read": ["/task"], "write": []}},
             }
             set_contracts(
@@ -323,9 +323,11 @@ class ContractTests(unittest.TestCase):
             project = Path(directory)
             initialize(project)
             invalid = (
-                {"version": 2, "actors": {}},
-                {"version": 1, "actors": {"bad actor": {"write": ["/x"]}}},
-                {"version": 1, "actors": {"worker": {"write": ["not/a/pointer"]}}},
+                {"version": 1, "actors": {}},
+                {"version": 2, "actors": {"bad actor": {"write": ["/x"]}}},
+                {"version": 2, "actors": {"worker": {"write": ["not/a/pointer"]}}},
+                {"version": 2, "actors": {"worker": {"budget": 0}}},
+                {"version": 2, "actors": {"worker": {"budget": True}}},
             )
             for definition in invalid:
                 with self.subTest(definition=definition):
@@ -385,7 +387,7 @@ class ContractTests(unittest.TestCase):
         allow_remove: bool = False,
     ) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": 2,
             "actors": {
                 "worker": {
                     "write": write,

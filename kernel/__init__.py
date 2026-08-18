@@ -29,6 +29,14 @@ from .schema import (
     set_schema,
     validate,
 )
+from .views import (
+    StaleViewError,
+    ViewError,
+    ViewRecord,
+    audit_views,
+    derive_view,
+    view,
+)
 
 __all__ = [
     "ContractError",
@@ -40,16 +48,21 @@ __all__ = [
     "SchemaError",
     "SchemaRecord",
     "StaleParentError",
+    "StaleViewError",
     "StateTreeError",
     "StepError",
     "StepRecord",
     "UnauthorizedWriteError",
+    "ViewError",
+    "ViewRecord",
     "apply_patch",
     "audit_contracts",
     "audit_schema",
+    "audit_views",
     "authorize",
     "collection",
     "contracts",
+    "derive_view",
     "entries",
     "initialize",
     "read_artifact",
@@ -61,4 +74,5 @@ __all__ = [
     "touched_paths",
     "validate",
     "verify",
+    "view",
 ]

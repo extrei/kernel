@@ -36,6 +36,10 @@ _Avoid_: Prompt permission, role description
 The reference to the Write Contract currently governing Patch authority.
 _Avoid_: Permission cache, current role
 
+**View**:
+A deterministic actor-specific subdocument of a Snapshot, constrained by its Write Contract and Schema.
+_Avoid_: Slice, prompt context
+
 **Collection**:
 A separately retained sequence referenced by a Snapshot rather than embedded in it.
 _Avoid_: Inline array, project history

@@ -27,9 +27,9 @@ from .kernel import (
 )
 from .schema import _read_schema_object, _resolve_schema_node
 
-_CONTRACT_VERSION = 1
+_CONTRACT_VERSION = 2
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_ACTOR_RULE_KEYS = {"allow_remove", "read", "write"}
+_ACTOR_RULE_KEYS = {"allow_remove", "budget", "read", "write"}
 
 
 class ContractError(StateTreeError):
@@ -217,7 +217,7 @@ def _check_contract(contract: dict[str, Any] | None) -> None:
     if not isinstance(contract, dict) or set(contract) != {"actors", "version"}:
         raise ContractError("contracts must contain exactly actors and version")
     if type(contract["version"]) is not int or contract["version"] != _CONTRACT_VERSION:
-        raise ContractError("contracts version must be 1")
+        raise ContractError("contracts version must be 2")
     actors = contract["actors"]
     if not isinstance(actors, dict):
         raise ContractError("contracts actors must be an object")
@@ -239,6 +239,11 @@ def _check_contract(contract: dict[str, Any] | None) -> None:
         if not isinstance(allow_remove, bool):
             raise ContractError(
                 f"contract actor {actor!r} allow_remove must be a boolean"
+            )
+        budget = rule.get("budget")
+        if budget is not None and (type(budget) is not int or budget < 1):
+            raise ContractError(
+                f"contract actor {actor!r} budget must be a positive integer"
             )
 
 
