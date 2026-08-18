@@ -1,5 +1,4 @@
 .DS_Store
-.state-tree/
 .venv/
 __pycache__/
 *.py[cod]

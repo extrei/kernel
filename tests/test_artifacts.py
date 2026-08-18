@@ -47,6 +47,10 @@ class StepRecordingTests(unittest.TestCase):
             self.assertEqual(entry["task_id"], "task-1")
             self.assertEqual(entry["payload_hash"], record.content_hash)
             self.assertEqual(entry["previous_hash"], _GENESIS_HASH)
+            self.assertEqual(entry["version"], 3)
+            self.assertEqual(entry["parent_state"], state["state_head"])
+            self.assertEqual(entry["state"], state["state_head"])
+            self.assertIsNone(entry["schema"])
             self.assertEqual(
                 entry["metadata"],
                 {
@@ -84,7 +88,10 @@ class StepRecordingTests(unittest.TestCase):
             second_entry = self._object_json(project, second.entry_hash)
             self.assertEqual(first.sequence, 1)
             self.assertEqual(second.sequence, 2)
-            self.assertEqual(second_entry["previous_hash"], first.entry_hash.removeprefix("sha256:"))
+            self.assertEqual(
+                second_entry["previous_hash"],
+                first.entry_hash.removeprefix("sha256:"),
+            )
             self.assertEqual(self._state(project)["revision"], 2)
             self.assertEqual(verify(project), second.entry_hash)
 

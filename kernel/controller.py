@@ -12,7 +12,6 @@ from .kernel import (
     append_ledger_entry,
     read_object,
     store_object,
-    verify,
 )
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -58,7 +57,6 @@ def record_step(
     root = Path(project_root).expanduser().resolve()
     if not root.is_dir():
         raise StepError(f"Project directory does not exist: {root}")
-    verify(root)
     artifact_path = _resolve_artifact_path(root, artifact)
 
     try:

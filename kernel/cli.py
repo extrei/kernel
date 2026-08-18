@@ -8,6 +8,17 @@ from collections.abc import Sequence
 
 from .kernel import StateTreeError, entries, initialize
 
+HANDOFF_CONTRACT = """
+Handoff contract (convention, not enforcement):
+  1. Register the plan before the work starts.
+  2. One task per handoff. A roadmap is not a task.
+  3. The worker's first write is its result file, not its last.
+  4. Register the result before starting the next task.
+  5. A task with one ledger entry is an open task.
+
+The kernel enforces none of this. It records only what you append.
+""".strip()
+
 
 def _nonnegative_limit(value: str) -> int:
     try:
@@ -71,6 +82,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         action = "Initialized" if result.created else "Already initialized"
         print(f"{action} state tree at {result.state_tree}")
+        print()
+        print(HANDOFF_CONTRACT)
         return 0
 
     if arguments.command == "log":

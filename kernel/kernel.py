@@ -17,24 +17,40 @@ from uuid import uuid4
 
 STATE_TREE_DIRECTORY = ".state-tree"
 OBJECTS_DIRECTORY = "objects"
+CACHE_DIRECTORY = "cache"
+VERIFIED_CHECKPOINT_FILE = "verified"
 HASH_ALGORITHM = "sha256"
 KERNEL_STATE_FILE = "kernel.json"
 KERNEL_LOCK_FILE = "kernel.lock"
 FORMAT_NAME = "state-tree"
 FORMAT_VERSION = 1
+_RUNTIME_IGNORE_RULES = (
+    f"/{KERNEL_LOCK_FILE}\n"
+    f"/.{KERNEL_STATE_FILE}.tmp-*\n"
+    f"/{OBJECTS_DIRECTORY}/{HASH_ALGORITHM}/.*.tmp-*\n"
+    f"/{CACHE_DIRECTORY}/\n"
+)
 
 _GENESIS_HASH = "0" * 64
-_LEDGER_ENTRY_VERSION = 1
+_GENESIS_STATE_CONTENT = b"{}"
+_GENESIS_STATE_REFERENCE = f"{HASH_ALGORITHM}:{sha256(_GENESIS_STATE_CONTENT).hexdigest()}"
+_LEDGER_ENTRY_VERSION = 3
+_CHECKPOINT_FORMAT_VERSION = 2
+_COLLECTION_REFERENCE_KEY = "$collection"
 _LEDGER_ENTRY_KEYS = {
     "actor",
     "kind",
     "metadata",
+    "parent_state",
     "payload_hash",
     "previous_hash",
     "recorded_at",
+    "schema",
     "sequence",
+    "state",
     "task_id",
     "version",
+    "view",
 }
 
 
@@ -64,6 +80,10 @@ class LedgerAppend:
     previous_hash: str
     payload_hash: str
     recorded_at: str
+    parent_state: str
+    state: str
+    schema: str | None
+    view: str | None
 
 
 def initialize(project_root: str | Path = ".") -> InitResult:
@@ -92,11 +112,11 @@ def initialize(project_root: str | Path = ".") -> InitResult:
     return InitResult(root, state_tree, created=True)
 
 
-def verify(project_root: str | Path = ".") -> str:
-    """Verify every durable ledger entry and return its current head reference."""
+def verify(project_root: str | Path = ".", *, strict: bool = False) -> str:
+    """Verify the ledger, optionally from its checkpoint, and return its head."""
 
     root = _resolve_project_root(project_root)
-    return _validate_state_tree(root / STATE_TREE_DIRECTORY)
+    return _validate_state_tree(root / STATE_TREE_DIRECTORY, strict=strict)
 
 
 def entries(project_root: str | Path = ".") -> list[dict[str, Any]]:
@@ -105,11 +125,19 @@ def entries(project_root: str | Path = ".") -> list[dict[str, Any]]:
     root = _resolve_project_root(project_root)
     state_tree = root / STATE_TREE_DIRECTORY
     state = _read_kernel_state(state_tree)
-    return _verify_ledger(
+    head_digest = _digest_from_reference(state["ledger_head"], label="ledger head")
+    ledger_entries = _verify_ledger(
         _object_directory(state_tree),
         revision=state["revision"],
-        head_digest=_digest_from_reference(state["ledger_head"], label="ledger head"),
+        head_digest=head_digest,
+        state_head=state["state_head"],
+        schema_head=state["schema_head"],
+        checkpoint=None,
     )
+    _write_checkpoint_best_effort(
+        state_tree, sequence=state["revision"], entry_hash=head_digest
+    )
+    return ledger_entries
 
 
 def store_object(project_root: str | Path, content: bytes) -> str:
@@ -157,37 +185,92 @@ def append_ledger_entry(
     root = _resolve_project_root(project_root)
     state_tree = root / STATE_TREE_DIRECTORY
     with _kernel_lock(state_tree):
-        state = _validated_kernel_state(state_tree)
-        object_directory = _object_directory(state_tree)
-        payload_digest = _digest_from_reference(payload_hash, label="payload")
-        _read_hashed_object(object_directory, payload_digest, label="payload")
-
-        sequence = state["revision"] + 1
-        previous_digest = _digest_from_reference(state["ledger_head"], label="ledger head")
-        recorded_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-            "+00:00", "Z"
+        kernel_state = _validated_kernel_state(state_tree)
+        state_head = kernel_state["state_head"]
+        return _append_ledger_entry_locked(
+            state_tree,
+            kernel_state,
+            actor=actor,
+            kind=kind,
+            task_id=task_id,
+            payload_hash=payload_hash,
+            metadata=metadata,
+            parent_state=state_head,
+            state=state_head,
+            schema=kernel_state["schema_head"],
+            view=None,
         )
-        entry = {
-            "actor": actor,
-            "kind": kind,
-            "metadata": dict(metadata),
-            "payload_hash": payload_hash,
-            "previous_hash": previous_digest,
-            "recorded_at": recorded_at,
-            "sequence": sequence,
-            "task_id": task_id,
-            "version": _LEDGER_ENTRY_VERSION,
-        }
-        try:
-            entry_content = _canonical_json_bytes(entry)
-        except (TypeError, ValueError) as error:
-            raise StateTreeError("ledger metadata must contain canonical JSON values") from error
 
-        entry_hash = _store_object_at(object_directory, entry_content)
-        next_state = dict(state)
-        next_state["ledger_head"] = entry_hash
-        next_state["revision"] = sequence
-        _write_kernel_state(state_tree, next_state)
+
+def _append_ledger_entry_locked(
+    state_tree: Path,
+    kernel_state: Mapping[str, Any],
+    *,
+    actor: str,
+    kind: str,
+    task_id: str,
+    payload_hash: str,
+    metadata: Mapping[str, Any],
+    parent_state: str,
+    state: str,
+    schema: str | None,
+    view: str | None,
+    schema_transition: bool = False,
+) -> LedgerAppend:
+    """Append after the caller has locked and verified the current state."""
+
+    if parent_state != kernel_state["state_head"]:
+        raise StateTreeError("ledger parent state does not match the current state head")
+    if not schema_transition and schema != kernel_state["schema_head"]:
+        raise StateTreeError("ledger schema does not match the current schema head")
+    if schema_transition and (kind != "schema" or parent_state != state):
+        raise StateTreeError("schema transitions must be unchanged-state schema entries")
+
+    object_directory = _object_directory(state_tree)
+    payload_digest = _digest_from_reference(payload_hash, label="payload")
+    _read_hashed_object(object_directory, payload_digest, label="payload")
+    _read_snapshot_object(object_directory, parent_state, label="parent state")
+    _read_snapshot_object(object_directory, state, label="state")
+    if schema is not None:
+        _read_json_mapping_object(object_directory, schema, label="schema")
+    if view is not None:
+        view_digest = _digest_from_reference(view, label="view")
+        _read_hashed_object(object_directory, view_digest, label="view")
+
+    sequence = kernel_state["revision"] + 1
+    previous_digest = _digest_from_reference(
+        kernel_state["ledger_head"], label="ledger head"
+    )
+    recorded_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    entry = {
+        "actor": actor,
+        "kind": kind,
+        "metadata": dict(metadata),
+        "parent_state": parent_state,
+        "payload_hash": payload_hash,
+        "previous_hash": previous_digest,
+        "recorded_at": recorded_at,
+        "schema": schema,
+        "sequence": sequence,
+        "state": state,
+        "task_id": task_id,
+        "version": _LEDGER_ENTRY_VERSION,
+        "view": view,
+    }
+    try:
+        entry_content = _canonical_json_bytes(entry)
+    except (TypeError, ValueError) as error:
+        raise StateTreeError("ledger metadata must contain canonical JSON values") from error
+
+    entry_hash = _store_object_at(object_directory, entry_content)
+    next_kernel_state = dict(kernel_state)
+    next_kernel_state["ledger_head"] = entry_hash
+    next_kernel_state["revision"] = sequence
+    next_kernel_state["state_head"] = state
+    next_kernel_state["schema_head"] = schema
+    _write_kernel_state(state_tree, next_kernel_state)
 
     return LedgerAppend(
         sequence=sequence,
@@ -195,6 +278,10 @@ def append_ledger_entry(
         previous_hash=f"{HASH_ALGORITHM}:{previous_digest}",
         payload_hash=payload_hash,
         recorded_at=recorded_at,
+        parent_state=parent_state,
+        state=state,
+        schema=schema,
+        view=view,
     )
 
 
@@ -202,19 +289,23 @@ def _create_state_tree(state_tree: Path) -> None:
     object_directory = _object_directory(state_tree)
     state_tree.mkdir(mode=0o700)
     object_directory.mkdir(parents=True)
+    state_head = _store_object_at(object_directory, _GENESIS_STATE_CONTENT)
     (state_tree / KERNEL_LOCK_FILE).touch(mode=0o600)
+    (state_tree / ".gitignore").write_text(_RUNTIME_IGNORE_RULES, encoding="utf-8")
 
     kernel_state = {
         "format": FORMAT_NAME,
         "format_version": FORMAT_VERSION,
         "ledger_head": f"{HASH_ALGORITHM}:{_GENESIS_HASH}",
         "revision": 0,
+        "schema_head": None,
+        "state_head": state_head,
     }
     _write_kernel_state(state_tree, kernel_state)
 
 
-def _validate_state_tree(state_tree: Path) -> str:
-    state = _validated_kernel_state(state_tree)
+def _validate_state_tree(state_tree: Path, *, strict: bool = False) -> str:
+    state = _validated_kernel_state(state_tree, strict=strict)
     return state["ledger_head"]
 
 
@@ -225,10 +316,6 @@ def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
     object_directory = _object_directory(state_tree)
     if object_directory.is_symlink() or not object_directory.is_dir():
         raise StateTreeError(f"State tree is missing object storage: {object_directory}")
-
-    lock_file = state_tree / KERNEL_LOCK_FILE
-    if lock_file.is_symlink() or not lock_file.is_file():
-        raise StateTreeError(f"State tree is missing kernel lock: {lock_file}")
 
     state_file = state_tree / KERNEL_STATE_FILE
     if state_file.is_symlink() or not state_file.is_file():
@@ -249,16 +336,30 @@ def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
     revision = parsed_state.get("revision")
     if type(revision) is not int or revision < 0:
         raise StateTreeError(f"Invalid kernel revision: {state_file}")
+    _digest_from_reference(parsed_state.get("state_head"), label="state head")
+    schema_head = parsed_state.get("schema_head")
+    if schema_head is not None:
+        _digest_from_reference(schema_head, label="schema head")
 
     return parsed_state
 
 
-def _validated_kernel_state(state_tree: Path) -> dict[str, Any]:
+def _validated_kernel_state(
+    state_tree: Path, *, strict: bool = False
+) -> dict[str, Any]:
     state = _read_kernel_state(state_tree)
+    head_digest = _digest_from_reference(state["ledger_head"], label="ledger head")
+    checkpoint = None if strict else _read_checkpoint(state_tree, state["revision"])
     _verify_ledger(
         _object_directory(state_tree),
         revision=state["revision"],
-        head_digest=_digest_from_reference(state["ledger_head"], label="ledger head"),
+        head_digest=head_digest,
+        state_head=state["state_head"],
+        schema_head=state["schema_head"],
+        checkpoint=checkpoint,
+    )
+    _write_checkpoint_best_effort(
+        state_tree, sequence=state["revision"], entry_hash=head_digest
     )
     return state
 
@@ -268,21 +369,31 @@ def _verify_ledger(
     *,
     revision: int,
     head_digest: str,
+    state_head: str,
+    schema_head: str | None,
+    checkpoint: tuple[int, str] | None,
 ) -> list[dict[str, Any]]:
     if revision == 0:
         if head_digest != _GENESIS_HASH:
             raise LedgerIntegrityError("empty ledger does not point to the genesis hash")
+        if state_head != _GENESIS_STATE_REFERENCE:
+            raise LedgerIntegrityError("empty ledger does not point to the genesis state")
+        if schema_head is not None:
+            raise LedgerIntegrityError("empty ledger has a schema head")
+        _read_snapshot_object(object_directory, state_head, label="genesis state")
         return []
 
     reverse_chain: list[tuple[str, dict[str, Any]]] = []
     current_digest = head_digest
+    checkpoint_reached = False
     for expected_sequence in range(revision, 0, -1):
         if current_digest == _GENESIS_HASH:
             raise LedgerIntegrityError("ledger reaches genesis before sequence 1")
 
+        entry_digest = current_digest
         content = _read_hashed_object(
             object_directory,
-            current_digest,
+            entry_digest,
             label=f"ledger sequence {expected_sequence}",
         )
         try:
@@ -296,23 +407,48 @@ def _verify_ledger(
             expected_sequence=expected_sequence,
             object_directory=object_directory,
         )
-        reverse_chain.append((current_digest, entry))
+        reverse_chain.append((entry_digest, entry))
         current_digest = entry["previous_hash"]
 
-    if current_digest != _GENESIS_HASH:
+        if checkpoint is not None and expected_sequence == checkpoint[0]:
+            if entry_digest == checkpoint[1]:
+                checkpoint_reached = True
+                break
+            checkpoint = None
+
+    full_walk = not checkpoint_reached
+    if full_walk and current_digest != _GENESIS_HASH:
         raise LedgerIntegrityError("ledger sequence 1 is not rooted at the genesis hash")
 
-    previous_digest = _GENESIS_HASH
-    for digest, entry in reversed(reverse_chain):
+    ordered_chain = list(reversed(reverse_chain))
+    if full_walk:
+        previous_digest = _GENESIS_HASH
+        previous_state = _GENESIS_STATE_REFERENCE
+        unchecked_chain = ordered_chain
+    else:
+        previous_digest, checkpoint_entry = ordered_chain[0]
+        previous_state = checkpoint_entry["state"]
+        unchecked_chain = ordered_chain[1:]
+
+    for digest, entry in unchecked_chain:
         if entry["previous_hash"] != previous_digest:
             raise LedgerIntegrityError(
                 f"ledger sequence {entry['sequence']} does not extend the preceding entry"
             )
+        if entry["parent_state"] != previous_state:
+            raise LedgerIntegrityError(
+                f"ledger sequence {entry['sequence']} does not extend the preceding state"
+            )
         previous_digest = digest
+        previous_state = entry["state"]
 
     if previous_digest != head_digest:
         raise LedgerIntegrityError("kernel ledger head does not match the verified chain")
-    return [entry for _, entry in reversed(reverse_chain)]
+    if ordered_chain[-1][1]["state"] != state_head:
+        raise LedgerIntegrityError("kernel state head does not match the verified chain")
+    if ordered_chain[-1][1]["schema"] != schema_head:
+        raise LedgerIntegrityError("kernel schema head does not match the verified chain")
+    return [entry for _, entry in ordered_chain]
 
 
 def _validate_ledger_entry(
@@ -343,6 +479,31 @@ def _validate_ledger_entry(
         raise LedgerIntegrityError(
             f"ledger sequence {expected_sequence} has an invalid previous hash"
         )
+    _read_snapshot_object(
+        object_directory,
+        entry.get("parent_state"),
+        label=f"ledger sequence {expected_sequence} parent state",
+    )
+    _read_snapshot_object(
+        object_directory,
+        entry.get("state"),
+        label=f"ledger sequence {expected_sequence} state",
+    )
+    schema = entry.get("schema")
+    if schema is not None:
+        _read_json_mapping_object(
+            object_directory,
+            schema,
+            label=f"ledger sequence {expected_sequence} schema",
+        )
+    view = entry.get("view")
+    if view is not None:
+        view_digest = _digest_from_reference(view, label="view")
+        _read_hashed_object(
+            object_directory,
+            view_digest,
+            label=f"ledger sequence {expected_sequence} view",
+        )
     payload_digest = _digest_from_reference(entry.get("payload_hash"), label="payload")
     _read_hashed_object(
         object_directory,
@@ -360,6 +521,65 @@ def _resolve_project_root(project_root: str | Path) -> Path:
 
 def _object_directory(state_tree: Path) -> Path:
     return state_tree / OBJECTS_DIRECTORY / HASH_ALGORITHM
+
+
+def _read_checkpoint(state_tree: Path, revision: int) -> tuple[int, str] | None:
+    checkpoint_file = state_tree / CACHE_DIRECTORY / VERIFIED_CHECKPOINT_FILE
+    if checkpoint_file.is_symlink() or not checkpoint_file.is_file():
+        return None
+    try:
+        checkpoint: Any = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {
+        "entry_hash",
+        "format_version",
+        "sequence",
+    }:
+        return None
+    sequence = checkpoint.get("sequence")
+    entry_hash = checkpoint.get("entry_hash")
+    if (
+        checkpoint.get("format_version") != _CHECKPOINT_FORMAT_VERSION
+        or type(sequence) is not int
+        or sequence < 1
+        or sequence > revision
+        or not _is_digest(entry_hash)
+    ):
+        return None
+    return sequence, entry_hash
+
+
+def _write_checkpoint_best_effort(
+    state_tree: Path, *, sequence: int, entry_hash: str
+) -> None:
+    if sequence == 0:
+        return
+    cache_directory = state_tree / CACHE_DIRECTORY
+    temporary_file = cache_directory / f".{VERIFIED_CHECKPOINT_FILE}.tmp-{uuid4().hex}"
+    try:
+        cache_directory.mkdir(mode=0o700, exist_ok=True)
+        if cache_directory.is_symlink() or not cache_directory.is_dir():
+            return
+        content = _canonical_json_bytes(
+            {
+                "entry_hash": entry_hash,
+                "format_version": _CHECKPOINT_FORMAT_VERSION,
+                "sequence": sequence,
+            }
+        )
+        with temporary_file.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_file, cache_directory / VERIFIED_CHECKPOINT_FILE)
+    except OSError:
+        pass
+    finally:
+        try:
+            temporary_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _store_object_at(object_directory: Path, content: bytes) -> str:
@@ -395,10 +615,95 @@ def _read_hashed_object(object_directory: Path, digest: str, *, label: str) -> b
     try:
         content = object_file.read_bytes()
     except OSError as error:
-        raise LedgerIntegrityError(f"{label.capitalize()} object is unreadable: {object_file}") from error
+        raise LedgerIntegrityError(
+            f"{label.capitalize()} object is unreadable: {object_file}"
+        ) from error
     if sha256(content).hexdigest() != digest:
-        raise LedgerIntegrityError(f"{label.capitalize()} object does not match its hash: {object_file}")
+        raise LedgerIntegrityError(
+            f"{label.capitalize()} object does not match its hash: {object_file}"
+        )
     return content
+
+
+def _read_snapshot_object(
+    object_directory: Path, reference: Any, *, label: str
+) -> dict[str, Any]:
+    snapshot = _read_canonical_json(object_directory, reference, label=label)
+    if not isinstance(snapshot, dict):
+        raise LedgerIntegrityError(f"{label.capitalize()} is not a JSON object")
+    _validate_collection_references(object_directory, snapshot, seen=set())
+    return snapshot
+
+
+def _read_json_mapping_object(
+    object_directory: Path, reference: Any, *, label: str
+) -> dict[str, Any]:
+    value = _read_canonical_json(object_directory, reference, label=label)
+    if not isinstance(value, dict):
+        raise LedgerIntegrityError(f"{label.capitalize()} is not a JSON object")
+    return value
+
+
+def _read_collection_object(
+    object_directory: Path, reference: Any, *, label: str
+) -> list[Any]:
+    value = _read_canonical_json(object_directory, reference, label=label)
+    if not isinstance(value, list):
+        raise LedgerIntegrityError(f"{label.capitalize()} is not a JSON array")
+    return value
+
+
+def _validate_collection_references(
+    object_directory: Path,
+    value: Any,
+    *,
+    seen: set[str],
+) -> None:
+    if _is_collection_reference(value):
+        reference = value[_COLLECTION_REFERENCE_KEY]
+        if reference in seen:
+            raise LedgerIntegrityError("collection references form a cycle")
+        collection = _read_collection_object(
+            object_directory, reference, label="collection"
+        )
+        seen.add(reference)
+        try:
+            _validate_collection_references(
+                object_directory, collection, seen=seen
+            )
+        finally:
+            seen.remove(reference)
+        return
+    if isinstance(value, dict):
+        for child in value.values():
+            _validate_collection_references(object_directory, child, seen=seen)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_collection_references(object_directory, child, seen=seen)
+
+
+def _is_collection_reference(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {_COLLECTION_REFERENCE_KEY}
+
+
+def _read_canonical_json(
+    object_directory: Path, reference: Any, *, label: str
+) -> Any:
+    digest = _digest_from_reference(reference, label=label)
+    content = _read_hashed_object(object_directory, digest, label=label)
+    try:
+        value: Any = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise LedgerIntegrityError(f"{label.capitalize()} is not valid JSON") from error
+    try:
+        canonical = _canonical_json_bytes(value)
+    except (TypeError, ValueError) as error:
+        raise LedgerIntegrityError(
+            f"{label.capitalize()} contains non-canonical JSON values"
+        ) from error
+    if canonical != content:
+        raise LedgerIntegrityError(f"{label.capitalize()} is not canonical JSON")
+    return value
 
 
 def _digest_from_reference(reference: Any, *, label: str) -> str:
@@ -436,12 +741,13 @@ def _write_kernel_state(state_tree: Path, state: Mapping[str, Any]) -> None:
 @contextmanager
 def _kernel_lock(state_tree: Path):
     lock_file = state_tree / KERNEL_LOCK_FILE
-    if lock_file.is_symlink() or not lock_file.is_file():
-        raise StateTreeError(f"State tree is missing kernel lock: {lock_file}")
     try:
-        handle = lock_file.open("r+b")
+        descriptor = os.open(
+            lock_file, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+        )
+        handle = os.fdopen(descriptor, "r+b")
     except OSError as error:
-        raise StateTreeError(f"Cannot open kernel lock: {lock_file}") from error
+        raise StateTreeError(f"Cannot create or open kernel lock: {lock_file}") from error
 
     with handle:
         try:
@@ -462,6 +768,7 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
         ensure_ascii=False,
+        allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")

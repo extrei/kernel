@@ -1,20 +1,23 @@
 import contextlib
+from hashlib import sha256
 import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from kernel.cli import main
+from kernel.cli import HANDOFF_CONTRACT, main
 from kernel.controller import record_step
 from kernel.kernel import (
     _GENESIS_HASH,
+    KERNEL_LOCK_FILE,
     KERNEL_STATE_FILE,
     OBJECTS_DIRECTORY,
     STATE_TREE_DIRECTORY,
     StateTreeError,
     entries,
     initialize,
+    verify,
 )
 
 
@@ -34,9 +37,46 @@ class StateTreeInitializationTests(unittest.TestCase):
             self.assertEqual(state["format_version"], 1)
             self.assertEqual(state["ledger_head"], f"sha256:{_GENESIS_HASH}")
             self.assertEqual(state["revision"], 0)
+            self.assertIsNone(state["schema_head"])
+            self.assertEqual(state["state_head"], f"sha256:{sha256(b'{}').hexdigest()}")
             object_directory = state_tree / OBJECTS_DIRECTORY / "sha256"
             self.assertTrue(object_directory.is_dir())
-            self.assertEqual(list(object_directory.iterdir()), [])
+            self.assertEqual(
+                [path.name for path in object_directory.iterdir()], [sha256(b"{}").hexdigest()]
+            )
+            self.assertEqual(
+                (state_tree / ".gitignore").read_text(encoding="utf-8"),
+                "/kernel.lock\n"
+                "/.kernel.json.tmp-*\n"
+                "/objects/sha256/.*.tmp-*\n"
+                "/cache/\n",
+            )
+
+    def test_clone_without_runtime_lock_can_verify_and_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "project"
+            project.mkdir()
+            initialize(project)
+            lock_file = project / STATE_TREE_DIRECTORY / KERNEL_LOCK_FILE
+            lock_file.unlink()
+
+            self.assertEqual(verify(project), f"sha256:{_GENESIS_HASH}")
+            artifact = project / "result.txt"
+            artifact.write_text("result", encoding="utf-8")
+            record_step(project, agent="a", task_id="clone", artifact=artifact, kind="test")
+
+            self.assertTrue(lock_file.is_file())
+
+            lock_file.unlink()
+            lock_file.symlink_to(project / "not-a-lock")
+            with self.assertRaisesRegex(StateTreeError, "Cannot create or open kernel lock"):
+                record_step(
+                    project,
+                    agent="agent",
+                    task_id="clone-test",
+                    artifact=artifact,
+                    kind="test",
+                )
 
     def test_valid_existing_tree_is_a_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -76,6 +116,30 @@ class StateTreeInitializationTests(unittest.TestCase):
 
             self.assertIn("Initialized state tree", output.getvalue())
             self.assertIn("Already initialized state tree", output.getvalue())
+
+    def test_cli_init_states_the_handoff_contract_on_every_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "project"
+            project.mkdir()
+
+            first = io.StringIO()
+            with contextlib.redirect_stdout(first):
+                self.assertEqual(main(["init", str(project)]), 0)
+            repeat = io.StringIO()
+            with contextlib.redirect_stdout(repeat):
+                self.assertEqual(main(["init", str(project)]), 0)
+
+            for output in (first.getvalue(), repeat.getvalue()):
+                self.assertIn(HANDOFF_CONTRACT, output)
+                self.assertIn("convention, not enforcement", output)
+
+            state_tree = project / STATE_TREE_DIRECTORY
+            self.assertEqual(
+                sorted(path.name for path in state_tree.iterdir()),
+                sorted(
+                    [".gitignore", KERNEL_LOCK_FILE, KERNEL_STATE_FILE, OBJECTS_DIRECTORY]
+                ),
+            )
 
     def test_cli_log_prints_three_verified_entries_and_respects_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

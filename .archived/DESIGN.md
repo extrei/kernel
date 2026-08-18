@@ -13,6 +13,8 @@
 - The local hash-object tree is the source of project provenance.
 - Unknown `format_version` values fail closed. Migrations are never written.
 - No watcher, scheduler, background process, CI workflow, or compatibility layer belongs in the runtime.
+- Durable state-tree files are portable; writer locks and atomic-write temporaries are runtime state.
+- One canonical Git branch advances a ledger. Merging divergent ledger heads is unsupported.
 
 ## Local layout
 
@@ -20,13 +22,18 @@
 
 ```text
 .state-tree/
+├── .gitignore              # excludes runtime state only
 ├── kernel.json             # format, ledger head, and revision
-├── kernel.lock             # serializes concurrent writes
+├── kernel.lock             # ignored; created when a writer starts
 └── objects/
     └── sha256/             # immutable content-addressed bytes
 ```
 
-Initialization does not inspect or import prior history, create a Git repository, invoke a model, or make a decision.
+The generated ignore rules leave `kernel.json` and `objects/` visible to an enclosing Git repository while excluding the lock and temporary writes. A valid empty content object preserves the object directory before the first step. A clone therefore verifies without a lock and recreates it on the next write.
+
+Initialization does not invoke Git, inspect or import prior history, create a repository, invoke a model, or make a decision.
+
+`state-tree init` prints a five-line handoff contract on every call, including the no-op repeat. The contract is stdout only: it is never written to `.state-tree/`, never recorded as a step, and never checked. A ledger that violates every line still verifies. It states ledger discipline that holds for any runner in any domain, and says nothing about provider invocation, transport, or transition rules, which remain the runner skill's concern.
 
 ## Step ledger
 
