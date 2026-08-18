@@ -34,24 +34,31 @@ _RUNTIME_IGNORE_RULES = (
 _GENESIS_HASH = "0" * 64
 _GENESIS_STATE_CONTENT = b"{}"
 _GENESIS_STATE_REFERENCE = f"{HASH_ALGORITHM}:{sha256(_GENESIS_STATE_CONTENT).hexdigest()}"
-_LEDGER_ENTRY_VERSION = 4
+_LEDGER_ENTRY_VERSION = 5
 _CHECKPOINT_FORMAT_VERSION = 2
 _COLLECTION_REFERENCE_KEY = "$collection"
 _LEDGER_ENTRY_KEYS = {
     "actor",
-    "contracts",
+    "blueprint",
     "kind",
     "metadata",
     "parent_state",
     "payload_hash",
     "previous_hash",
     "recorded_at",
-    "schema",
     "sequence",
     "state",
     "task_id",
     "version",
     "view",
+}
+_KERNEL_STATE_KEYS = {
+    "blueprint_head",
+    "format",
+    "format_version",
+    "ledger_head",
+    "revision",
+    "state_head",
 }
 
 
@@ -83,8 +90,7 @@ class LedgerAppend:
     recorded_at: str
     parent_state: str
     state: str
-    schema: str | None
-    contracts: str | None
+    blueprint: str | None
     view: str | None
 
 
@@ -128,19 +134,14 @@ def entries(project_root: str | Path = ".") -> list[dict[str, Any]]:
     state_tree = root / STATE_TREE_DIRECTORY
     state = _read_kernel_state(state_tree)
     head_digest = _digest_from_reference(state["ledger_head"], label="ledger head")
-    ledger_entries = _verify_ledger(
+    return _verify_ledger(
         _object_directory(state_tree),
         revision=state["revision"],
         head_digest=head_digest,
         state_head=state["state_head"],
-        schema_head=state["schema_head"],
-        contracts_head=state["contracts_head"],
+        blueprint_head=state["blueprint_head"],
         checkpoint=None,
     )
-    _write_checkpoint_best_effort(
-        state_tree, sequence=state["revision"], entry_hash=head_digest
-    )
-    return ledger_entries
 
 
 def store_object(project_root: str | Path, content: bytes) -> str:
@@ -200,8 +201,7 @@ def append_ledger_entry(
             metadata=metadata,
             parent_state=state_head,
             state=state_head,
-            schema=kernel_state["schema_head"],
-            contracts=kernel_state["contracts_head"],
+            blueprint=kernel_state["blueprint_head"],
             view=None,
         )
 
@@ -217,27 +217,21 @@ def _append_ledger_entry_locked(
     metadata: Mapping[str, Any],
     parent_state: str,
     state: str,
-    schema: str | None,
-    contracts: str | None,
+    blueprint: str | None,
     view: str | None,
-    schema_transition: bool = False,
-    contracts_transition: bool = False,
+    blueprint_transition: bool = False,
 ) -> LedgerAppend:
     """Append after the caller has locked and verified the current state."""
 
     if parent_state != kernel_state["state_head"]:
         raise StateTreeError("ledger parent state does not match the current state head")
-    if not schema_transition and schema != kernel_state["schema_head"]:
-        raise StateTreeError("ledger schema does not match the current schema head")
-    if not contracts_transition and contracts != kernel_state["contracts_head"]:
-        raise StateTreeError("ledger contracts do not match the current contracts head")
-    if schema_transition and contracts_transition:
-        raise StateTreeError("a ledger entry cannot transition schema and contracts together")
-    if schema_transition and (kind != "schema" or parent_state != state):
-        raise StateTreeError("schema transitions must be unchanged-state schema entries")
-    if contracts_transition and (kind != "contracts" or parent_state != state):
+    if not blueprint_transition and blueprint != kernel_state["blueprint_head"]:
         raise StateTreeError(
-            "contract transitions must be unchanged-state contracts entries"
+            "ledger blueprint does not match the current blueprint head"
+        )
+    if blueprint_transition and (kind != "blueprint" or parent_state != state):
+        raise StateTreeError(
+            "blueprint transitions must be unchanged-state blueprint entries"
         )
 
     object_directory = _object_directory(state_tree)
@@ -245,10 +239,8 @@ def _append_ledger_entry_locked(
     _read_hashed_object(object_directory, payload_digest, label="payload")
     _read_snapshot_object(object_directory, parent_state, label="parent state")
     _read_snapshot_object(object_directory, state, label="state")
-    if schema is not None:
-        _read_json_mapping_object(object_directory, schema, label="schema")
-    if contracts is not None:
-        _read_json_mapping_object(object_directory, contracts, label="contracts")
+    if blueprint is not None:
+        _read_json_mapping_object(object_directory, blueprint, label="blueprint")
     if view is not None:
         _read_json_mapping_object(object_directory, view, label="view")
 
@@ -261,14 +253,13 @@ def _append_ledger_entry_locked(
     )
     entry = {
         "actor": actor,
-        "contracts": contracts,
+        "blueprint": blueprint,
         "kind": kind,
         "metadata": dict(metadata),
         "parent_state": parent_state,
         "payload_hash": payload_hash,
         "previous_hash": previous_digest,
         "recorded_at": recorded_at,
-        "schema": schema,
         "sequence": sequence,
         "state": state,
         "task_id": task_id,
@@ -285,8 +276,7 @@ def _append_ledger_entry_locked(
     next_kernel_state["ledger_head"] = entry_hash
     next_kernel_state["revision"] = sequence
     next_kernel_state["state_head"] = state
-    next_kernel_state["schema_head"] = schema
-    next_kernel_state["contracts_head"] = contracts
+    next_kernel_state["blueprint_head"] = blueprint
     _write_kernel_state(state_tree, next_kernel_state)
 
     return LedgerAppend(
@@ -297,8 +287,7 @@ def _append_ledger_entry_locked(
         recorded_at=recorded_at,
         parent_state=parent_state,
         state=state,
-        schema=schema,
-        contracts=contracts,
+        blueprint=blueprint,
         view=view,
     )
 
@@ -312,12 +301,11 @@ def _create_state_tree(state_tree: Path) -> None:
     (state_tree / ".gitignore").write_text(_RUNTIME_IGNORE_RULES, encoding="utf-8")
 
     kernel_state = {
+        "blueprint_head": None,
         "format": FORMAT_NAME,
         "format_version": FORMAT_VERSION,
-        "contracts_head": None,
         "ledger_head": f"{HASH_ALGORITHM}:{_GENESIS_HASH}",
         "revision": 0,
-        "schema_head": None,
         "state_head": state_head,
     }
     _write_kernel_state(state_tree, kernel_state)
@@ -347,6 +335,8 @@ def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
 
     if not isinstance(parsed_state, dict):
         raise StateTreeError(f"Kernel state is not an object: {state_file}")
+    if set(parsed_state) != _KERNEL_STATE_KEYS:
+        raise StateTreeError(f"Kernel state has an invalid schema: {state_file}")
     if parsed_state.get("format") != FORMAT_NAME:
         raise StateTreeError(f"Unsupported state-tree format: {state_file}")
     if parsed_state.get("format_version") != FORMAT_VERSION:
@@ -356,14 +346,9 @@ def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
     if type(revision) is not int or revision < 0:
         raise StateTreeError(f"Invalid kernel revision: {state_file}")
     _digest_from_reference(parsed_state.get("state_head"), label="state head")
-    schema_head = parsed_state.get("schema_head")
-    if schema_head is not None:
-        _digest_from_reference(schema_head, label="schema head")
-    if "contracts_head" not in parsed_state:
-        raise StateTreeError(f"Kernel state has no contracts head: {state_file}")
-    contracts_head = parsed_state["contracts_head"]
-    if contracts_head is not None:
-        _digest_from_reference(contracts_head, label="contracts head")
+    blueprint_head = parsed_state["blueprint_head"]
+    if blueprint_head is not None:
+        _digest_from_reference(blueprint_head, label="blueprint head")
 
     return parsed_state
 
@@ -379,8 +364,7 @@ def _validated_kernel_state(
         revision=state["revision"],
         head_digest=head_digest,
         state_head=state["state_head"],
-        schema_head=state["schema_head"],
-        contracts_head=state["contracts_head"],
+        blueprint_head=state["blueprint_head"],
         checkpoint=checkpoint,
     )
     _write_checkpoint_best_effort(
@@ -395,8 +379,7 @@ def _verify_ledger(
     revision: int,
     head_digest: str,
     state_head: str,
-    schema_head: str | None,
-    contracts_head: str | None,
+    blueprint_head: str | None,
     checkpoint: tuple[int, str] | None,
 ) -> list[dict[str, Any]]:
     if revision == 0:
@@ -404,10 +387,8 @@ def _verify_ledger(
             raise LedgerIntegrityError("empty ledger does not point to the genesis hash")
         if state_head != _GENESIS_STATE_REFERENCE:
             raise LedgerIntegrityError("empty ledger does not point to the genesis state")
-        if schema_head is not None:
-            raise LedgerIntegrityError("empty ledger has a schema head")
-        if contracts_head is not None:
-            raise LedgerIntegrityError("empty ledger has a contracts head")
+        if blueprint_head is not None:
+            raise LedgerIntegrityError("empty ledger has a blueprint head")
         _read_snapshot_object(object_directory, state_head, label="genesis state")
         return []
 
@@ -474,10 +455,10 @@ def _verify_ledger(
         raise LedgerIntegrityError("kernel ledger head does not match the verified chain")
     if ordered_chain[-1][1]["state"] != state_head:
         raise LedgerIntegrityError("kernel state head does not match the verified chain")
-    if ordered_chain[-1][1]["schema"] != schema_head:
-        raise LedgerIntegrityError("kernel schema head does not match the verified chain")
-    if ordered_chain[-1][1]["contracts"] != contracts_head:
-        raise LedgerIntegrityError("kernel contracts head does not match the verified chain")
+    if ordered_chain[-1][1]["blueprint"] != blueprint_head:
+        raise LedgerIntegrityError(
+            "kernel blueprint head does not match the verified chain"
+        )
     return [entry for _, entry in ordered_chain]
 
 
@@ -519,19 +500,12 @@ def _validate_ledger_entry(
         entry.get("state"),
         label=f"ledger sequence {expected_sequence} state",
     )
-    schema = entry.get("schema")
-    if schema is not None:
+    blueprint = entry.get("blueprint")
+    if blueprint is not None:
         _read_json_mapping_object(
             object_directory,
-            schema,
-            label=f"ledger sequence {expected_sequence} schema",
-        )
-    contracts = entry.get("contracts")
-    if contracts is not None:
-        _read_json_mapping_object(
-            object_directory,
-            contracts,
-            label=f"ledger sequence {expected_sequence} contracts",
+            blueprint,
+            label=f"ledger sequence {expected_sequence} blueprint",
         )
     view = entry.get("view")
     if view is not None:

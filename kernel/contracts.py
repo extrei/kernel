@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -12,20 +11,14 @@ from .jsonpatch import PatchError, _pointer_tokens, touched_paths
 from .kernel import (
     STATE_TREE_DIRECTORY,
     StateTreeError,
-    _GENESIS_STATE_REFERENCE,
-    _append_ledger_entry_locked,
-    _canonical_json_bytes,
     _digest_from_reference,
-    _kernel_lock,
     _object_directory,
     _read_hashed_object,
     _read_json_mapping_object,
     _resolve_project_root,
-    _store_object_at,
-    _validated_kernel_state,
     entries,
 )
-from .schema import _read_schema_object, _resolve_schema_node
+from .schema import _resolve_schema_node
 
 _CONTRACT_VERSION = 2
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -40,87 +33,13 @@ class UnauthorizedWriteError(ContractError):
     """Raised when an actor's contract does not grant a patch operation."""
 
 
-@dataclass(frozen=True)
-class ContractRecord:
-    """The durable identities produced by one write-contract change."""
-
-    project_root: Path
-    actor: str
-    task_id: str
-    contracts: str | None
-    payload_hash: str
-    entry_hash: str
-    sequence: int
-
-
 def contracts(project_root: str | Path) -> dict[str, Any] | None:
     """Return the write contract currently in force, if any."""
 
-    root = _resolve_project_root(project_root)
-    state_tree = root / STATE_TREE_DIRECTORY
-    kernel_state = _validated_kernel_state(state_tree)
-    return _read_contract_object(
-        _object_directory(state_tree), kernel_state["contracts_head"]
-    )
+    from .blueprint import _blueprint_authorities, blueprint
 
-
-def set_contracts(
-    project_root: str | Path,
-    *,
-    actor: str,
-    task_id: str,
-    contracts: dict[str, Any] | None,
-) -> ContractRecord:
-    """Validate and atomically place a write contract in force."""
-
-    _validate_identifier(actor, label="actor")
-    _validate_identifier(task_id, label="task id")
-    _check_contract(contracts)
-
-    root = _resolve_project_root(project_root)
-    state_tree = root / STATE_TREE_DIRECTORY
-    with _kernel_lock(state_tree):
-        kernel_state = _validated_kernel_state(state_tree)
-        object_directory = _object_directory(state_tree)
-        current_schema = _read_schema_object(
-            object_directory, kernel_state["schema_head"]
-        )
-        _check_schema_paths(contracts, current_schema)
-
-        if contracts is None:
-            contracts_reference = None
-            payload_hash = _GENESIS_STATE_REFERENCE
-        else:
-            payload_hash = _store_object_at(
-                object_directory, _canonical_json_bytes(contracts)
-            )
-            contracts_reference = payload_hash
-
-        append = _append_ledger_entry_locked(
-            state_tree,
-            kernel_state,
-            actor=actor,
-            kind="contracts",
-            task_id=task_id,
-            payload_hash=payload_hash,
-            metadata={},
-            parent_state=kernel_state["state_head"],
-            state=kernel_state["state_head"],
-            schema=kernel_state["schema_head"],
-            contracts=contracts_reference,
-            view=None,
-            contracts_transition=True,
-        )
-
-    return ContractRecord(
-        project_root=root,
-        actor=actor,
-        task_id=task_id,
-        contracts=contracts_reference,
-        payload_hash=payload_hash,
-        entry_hash=append.entry_hash,
-        sequence=append.sequence,
-    )
+    _, current_contracts = _blueprint_authorities(blueprint(project_root))
+    return current_contracts
 
 
 def authorize(
@@ -167,6 +86,12 @@ def audit_contracts(project_root: str | Path) -> list[dict[str, Any]]:
     root = _resolve_project_root(project_root)
     ledger_entries = entries(root)
     object_directory = _object_directory(root / STATE_TREE_DIRECTORY)
+    from .blueprint import (
+        BlueprintError,
+        _blueprint_authorities,
+        _read_blueprint_object,
+    )
+
     results: list[dict[str, Any]] = []
     for entry in ledger_entries:
         is_patch = entry["kind"] == "patch" or entry["parent_state"] != entry["state"]
@@ -181,17 +106,24 @@ def audit_contracts(project_root: str | Path) -> list[dict[str, Any]]:
                 )
                 patch = json.loads(content)
                 patch_paths = touched_paths(patch)
-                contract = _read_contract_object(
-                    object_directory, entry["contracts"]
+                entry_blueprint = _read_blueprint_object(
+                    object_directory, entry["blueprint"]
                 )
+                _, contract = _blueprint_authorities(entry_blueprint)
                 authorize(patch_paths, contract, actor=entry["actor"])
-            except (ContractError, PatchError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            except (
+                BlueprintError,
+                ContractError,
+                PatchError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ) as error:
                 valid = False
                 message = str(error)
         results.append(
             {
                 "actor": entry["actor"],
-                "contracts": entry["contracts"],
+                "blueprint": entry["blueprint"],
                 "error": message,
                 "patch": is_patch,
                 "sequence": entry["sequence"],

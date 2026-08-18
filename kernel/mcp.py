@@ -18,6 +18,7 @@ from mcp.types import ToolAnnotations
 from .controller import read_artifact as read_artifact_bytes
 from .controller import record_step
 from .kernel import StateTreeError, verify
+from .state import apply_patch
 from .views import view as derive_actor_view
 
 PROJECT_ENVIRONMENT_VARIABLE = "KERNEL_PROJECT"
@@ -26,10 +27,13 @@ ACTOR_ENVIRONMENT_VARIABLE = "KERNEL_ACTOR"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SERVER_INSTRUCTIONS = (
     "This server is bound to one project-local kernel and one agent "
-    "identity. Submit finished project steps with submit_step and share their "
-    "content hashes with other agents through read_artifact. Read the bound "
-    "actor's current state slice with get_view. The actor identity is fixed when "
-    "the server starts and must never come from a tool argument."
+    "identity. Read the bound actor's current View with get_view, then change "
+    "project state with submit_patch, quoting the state and view_hash that "
+    "get_view returned. A refused patch is recorded in the ledger and raises "
+    "with the stage that refused it. Submit finished project files with "
+    "submit_step and share their content hashes with other agents through "
+    "read_artifact. The actor identity is fixed when the server starts and "
+    "must never come from a tool argument."
 )
 
 
@@ -58,7 +62,7 @@ def create_server(
         "project-kernel",
         title="Project kernel",
         instructions=_SERVER_INSTRUCTIONS,
-        version="0.4.0",
+        version="0.6.0",
     )
 
     def binding() -> ServerBinding:
@@ -96,11 +100,53 @@ def create_server(
         )
         return {
             "actor": record.actor,
-            "contracts": record.contracts,
+            "blueprint": record.blueprint,
             "document": record.document,
-            "schema": record.schema,
             "state": record.state,
             "view_hash": record.view_hash,
+        }
+
+    @server.tool(
+        title="Submit a patch",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    def submit_patch(
+        task_id: str,
+        patch: list[dict[str, Any]],
+        parent_state: str,
+        view: str | None = None,
+    ) -> dict[str, Any]:
+        """Propose a JSON Patch against the state get_view reported.
+
+        ``parent_state`` and ``view`` come from get_view. The patch is refused
+        unless it satisfies patch syntax, this actor's write contract, the view
+        it was prepared from, patch application, and the blueprint schema.
+        """
+
+        current = binding()
+        record = apply_patch(
+            current.project_root,
+            actor=current.actor,
+            task_id=task_id,
+            patch=patch,
+            parent_state=parent_state,
+            view=view,
+        )
+        return {
+            "actor": record.actor,
+            "entry_hash": record.entry_hash,
+            "kind": record.kind,
+            "parent_state": record.parent_state,
+            "patch_hash": record.patch_hash,
+            "sequence": record.sequence,
+            "state": record.state,
+            "task_id": record.task_id,
+            "view": record.view,
         }
 
     @server.tool(

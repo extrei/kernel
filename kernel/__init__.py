@@ -1,13 +1,20 @@
 """Local kernel primitives for projects."""
 
+from .blueprint import (
+    BlueprintError,
+    BlueprintRecord,
+    blueprint,
+    check_blueprint,
+    meta_schema,
+    set_blueprint,
+)
+from .circuit import CircuitVerdict, circuit, events, schedule
 from .contracts import (
     ContractError,
-    ContractRecord,
     UnauthorizedWriteError,
     audit_contracts,
     authorize,
     contracts,
-    set_contracts,
 )
 from .controller import StepError, StepRecord, read_artifact, record_step
 from .jsonpatch import PatchError, touched_paths
@@ -22,11 +29,9 @@ from .kernel import (
 from .state import PatchRecord, StaleParentError, apply_patch, state
 from .schema import (
     SchemaError,
-    SchemaRecord,
     audit_schema,
     collection,
     schema,
-    set_schema,
     validate,
 )
 from .views import (
@@ -39,14 +44,15 @@ from .views import (
 )
 
 __all__ = [
+    "BlueprintError",
+    "BlueprintRecord",
+    "CircuitVerdict",
     "ContractError",
-    "ContractRecord",
     "InitResult",
     "LedgerIntegrityError",
     "PatchError",
     "PatchRecord",
     "SchemaError",
-    "SchemaRecord",
     "StaleParentError",
     "StaleViewError",
     "StateTreeError",
@@ -60,16 +66,21 @@ __all__ = [
     "audit_schema",
     "audit_views",
     "authorize",
+    "blueprint",
+    "check_blueprint",
+    "circuit",
     "collection",
     "contracts",
     "derive_view",
     "entries",
+    "events",
     "initialize",
+    "meta_schema",
     "read_artifact",
     "record_step",
+    "schedule",
     "schema",
-    "set_contracts",
-    "set_schema",
+    "set_blueprint",
     "state",
     "touched_paths",
     "validate",

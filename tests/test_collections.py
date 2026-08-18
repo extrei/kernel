@@ -4,11 +4,12 @@ import tempfile
 import unittest
 
 from kernel import (
+    BlueprintError,
     SchemaError,
     apply_patch,
     audit_schema,
     collection,
-    set_schema,
+    set_blueprint,
     state,
 )
 from kernel.kernel import LedgerIntegrityError, initialize, verify
@@ -19,7 +20,7 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            schema_record = set_schema(
+            blueprint_record = self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collections",
@@ -48,7 +49,8 @@ class CollectionTests(unittest.TestCase):
                 self._object_json(project, reference), [{"name": "inspect"}]
             )
             self.assertEqual(
-                self._entry(project, first.entry_hash)["schema"], schema_record.schema
+                self._entry(project, first.entry_hash)["blueprint"],
+                blueprint_record.blueprint,
             )
 
             second = apply_patch(
@@ -78,7 +80,7 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collection-gate",
@@ -107,14 +109,21 @@ class CollectionTests(unittest.TestCase):
                     ],
                 )
 
-            self.assertEqual(self._kernel_state(project), before_state)
-            self.assertEqual(set(self._object_directory(project).iterdir()), before_objects)
+            after_state = self._kernel_state(project)
+            self.assertEqual(after_state["state_head"], before_state["state_head"])
+            self.assertEqual(
+                after_state["blueprint_head"], before_state["blueprint_head"]
+            )
+            self.assertEqual(after_state["revision"], before_state["revision"] + 1)
+            self.assertLess(
+                len(before_objects), len(set(self._object_directory(project).iterdir()))
+            )
 
     def test_schema_change_can_materialize_an_existing_collection_later(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collection-schema-change",
@@ -128,7 +137,7 @@ class CollectionTests(unittest.TestCase):
                 parent_state=parent,
                 patch=[{"op": "add", "path": "/actions", "value": []}],
             )
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collection-schema-change",
@@ -157,7 +166,7 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collection-integrity",
@@ -197,11 +206,12 @@ class CollectionTests(unittest.TestCase):
                     }
                 },
             }
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="collection-pointer",
                 schema=definition,
+                paths=["/a~1b", "/a~1b/*"],
             )
             parent = self._kernel_state(project)["state_head"]
             apply_patch(
@@ -220,8 +230,10 @@ class CollectionTests(unittest.TestCase):
             project = Path(directory)
             initialize(project)
 
-            with self.assertRaisesRegex(SchemaError, "requires a schema with type array"):
-                set_schema(
+            with self.assertRaisesRegex(
+                BlueprintError, "requires a schema with type array"
+            ):
+                self._install_schema_blueprint(
                     project,
                     actor="human",
                     task_id="bad-collection-schema",
@@ -248,6 +260,32 @@ class CollectionTests(unittest.TestCase):
                 }
             },
         }
+
+    @staticmethod
+    def _install_schema_blueprint(
+        project: Path,
+        *,
+        actor: str,
+        task_id: str,
+        schema: dict[str, object],
+        paths: list[str] | None = None,
+    ):
+        grants = ["/actions", "/actions/*"] if paths is None else paths
+        return set_blueprint(
+            project,
+            actor=actor,
+            task_id=task_id,
+            blueprint={
+                "version": 2,
+                "schema": schema,
+                "contracts": {
+                    "version": 2,
+                    "actors": {
+                        "codex": {"read": grants, "write": grants}
+                    },
+                },
+            },
+        )
 
     @staticmethod
     def _kernel_state(project: Path) -> dict[str, object]:

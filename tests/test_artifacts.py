@@ -47,11 +47,10 @@ class StepRecordingTests(unittest.TestCase):
             self.assertEqual(entry["task_id"], "task-1")
             self.assertEqual(entry["payload_hash"], record.content_hash)
             self.assertEqual(entry["previous_hash"], _GENESIS_HASH)
-            self.assertEqual(entry["version"], 4)
+            self.assertEqual(entry["version"], 5)
             self.assertEqual(entry["parent_state"], state["state_head"])
             self.assertEqual(entry["state"], state["state_head"])
-            self.assertIsNone(entry["schema"])
-            self.assertIsNone(entry["contracts"])
+            self.assertIsNone(entry["blueprint"])
             self.assertEqual(
                 entry["metadata"],
                 {

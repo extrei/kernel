@@ -6,14 +6,13 @@ import tempfile
 import unittest
 
 from kernel import (
-    ContractError,
+    BlueprintError,
     UnauthorizedWriteError,
     apply_patch,
     audit_contracts,
     authorize,
     contracts,
-    set_contracts,
-    set_schema,
+    set_blueprint,
     state,
     verify,
 )
@@ -64,16 +63,21 @@ class ContractTests(unittest.TestCase):
                 )
 
             self.assertEqual(state(project), {"value": 2})
-            self.assertEqual(self._kernel_state(project), before_state)
-            self.assertEqual(self._object_names(project), before_objects)
+            after_state = self._kernel_state(project)
+            self.assertEqual(after_state["state_head"], before_state["state_head"])
+            self.assertEqual(
+                after_state["blueprint_head"], before_state["blueprint_head"]
+            )
+            self.assertEqual(after_state["revision"], before_state["revision"] + 1)
+            self.assertLess(len(before_objects), len(self._object_names(project)))
 
-    def test_contract_commit_and_later_entry_carry_the_contract_head(self) -> None:
+    def test_blueprint_commit_and_later_entry_carry_the_blueprint_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
             definition = self._contract(write=["/plan"])
 
-            contract_record = set_contracts(
+            blueprint_record = self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="install-contract",
@@ -81,12 +85,18 @@ class ContractTests(unittest.TestCase):
             )
 
             kernel_state = self._kernel_state(project)
-            contract_entry = self._object_json(project, contract_record.entry_hash)
-            self.assertEqual(kernel_state["contracts_head"], contract_record.contracts)
-            self.assertEqual(contract_record.payload_hash, contract_record.contracts)
-            self.assertEqual(contract_entry["kind"], "contracts")
-            self.assertEqual(contract_entry["contracts"], contract_record.contracts)
-            self.assertEqual(contract_entry["parent_state"], contract_entry["state"])
+            blueprint_entry = self._object_json(project, blueprint_record.entry_hash)
+            self.assertEqual(
+                kernel_state["blueprint_head"], blueprint_record.blueprint
+            )
+            self.assertEqual(
+                blueprint_record.payload_hash, blueprint_record.blueprint
+            )
+            self.assertEqual(blueprint_entry["kind"], "blueprint")
+            self.assertEqual(
+                blueprint_entry["blueprint"], blueprint_record.blueprint
+            )
+            self.assertEqual(blueprint_entry["parent_state"], blueprint_entry["state"])
             self.assertEqual(contracts(project), definition)
 
             changed = apply_patch(
@@ -97,9 +107,12 @@ class ContractTests(unittest.TestCase):
                 patch=[{"op": "add", "path": "/plan", "value": {}}],
             )
             patch_entry = self._object_json(project, changed.entry_hash)
-            self.assertEqual(patch_entry["contracts"], contract_record.contracts)
             self.assertEqual(
-                patch_entry["contracts"], self._kernel_state(project)["contracts_head"]
+                patch_entry["blueprint"], blueprint_record.blueprint
+            )
+            self.assertEqual(
+                patch_entry["blueprint"],
+                self._kernel_state(project)["blueprint_head"],
             )
             self.assertEqual(verify(project, strict=True), changed.entry_hash)
 
@@ -129,7 +142,7 @@ class ContractTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/plan", "value": {}}],
             )
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="contract-paths",
@@ -155,8 +168,13 @@ class ContractTests(unittest.TestCase):
                 )
 
             self.assertEqual(state(project), {"plan": {"status": "draft"}})
-            self.assertEqual(self._kernel_state(project), before_state)
-            self.assertEqual(self._object_names(project), before_objects)
+            after_state = self._kernel_state(project)
+            self.assertEqual(after_state["state_head"], before_state["state_head"])
+            self.assertEqual(
+                after_state["blueprint_head"], before_state["blueprint_head"]
+            )
+            self.assertEqual(after_state["revision"], before_state["revision"] + 1)
+            self.assertLess(len(before_objects), len(self._object_names(project)))
 
     def test_unknown_actor_and_write_to_read_only_path_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -174,7 +192,7 @@ class ContractTests(unittest.TestCase):
                 "version": 2,
                 "actors": {"verifier": {"read": ["/task"], "write": []}},
             }
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="read-contract",
@@ -217,7 +235,7 @@ class ContractTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/temporary", "value": True}],
             )
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="remove-contract",
@@ -232,7 +250,7 @@ class ContractTests(unittest.TestCase):
                     patch=[{"op": "remove", "path": "/temporary"}],
                 )
 
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="remove-contract",
@@ -258,17 +276,13 @@ class ContractTests(unittest.TestCase):
                 "properties": {"plan": {"type": "string"}},
                 "additionalProperties": False,
             }
-            set_schema(
+            set_blueprint(
                 project,
                 actor="human",
                 task_id="auth-order",
-                schema=schema,
-            )
-            set_contracts(
-                project,
-                actor="human",
-                task_id="auth-order",
-                contracts=self._contract(write=["/plan"]),
+                blueprint=self._blueprint(
+                    schema, self._contract(write=["/plan"])
+                ),
             )
             kernel_state = self._kernel_state(project)
 
@@ -287,35 +301,33 @@ class ContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_schema(
-                project,
-                actor="human",
-                task_id="contract-schema",
-                schema={
-                    "type": "object",
-                    "properties": {
-                        "plan": {
-                            "type": "object",
-                            "properties": {"status": {"type": "string"}},
-                            "additionalProperties": False,
-                        }
-                    },
-                    "additionalProperties": False,
+            schema = {
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string"}},
+                        "additionalProperties": False,
+                    }
                 },
-            )
-
-            set_contracts(
+                "additionalProperties": False,
+            }
+            set_blueprint(
                 project,
                 actor="human",
                 task_id="contract-schema",
-                contracts=self._contract(write=["/plan/*"]),
+                blueprint=self._blueprint(
+                    schema, self._contract(write=["/plan/*"])
+                ),
             )
-            with self.assertRaisesRegex(ContractError, "absent from schema"):
-                set_contracts(
+            with self.assertRaisesRegex(BlueprintError, "absent from schema"):
+                set_blueprint(
                     project,
                     actor="human",
                     task_id="contract-schema",
-                    contracts=self._contract(write=["/missing"]),
+                    blueprint=self._blueprint(
+                        schema, self._contract(write=["/missing"])
+                    ),
                 )
 
     def test_malformed_contracts_are_rejected(self) -> None:
@@ -331,8 +343,8 @@ class ContractTests(unittest.TestCase):
             )
             for definition in invalid:
                 with self.subTest(definition=definition):
-                    with self.assertRaises(ContractError):
-                        set_contracts(
+                    with self.assertRaises(BlueprintError):
+                        self._install_contract_blueprint(
                             project,
                             actor="human",
                             task_id="invalid-contract",
@@ -343,7 +355,7 @@ class ContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="audit-contract",
@@ -368,8 +380,7 @@ class ContractTests(unittest.TestCase):
                     metadata={},
                     parent_state=kernel_state["state_head"],
                     state=state_hash,
-                    schema=kernel_state["schema_head"],
-                    contracts=kernel_state["contracts_head"],
+                    blueprint=kernel_state["blueprint_head"],
                     view=None,
                 )
 
@@ -396,6 +407,29 @@ class ContractTests(unittest.TestCase):
                 }
             },
         }
+
+    @staticmethod
+    def _blueprint(
+        schema: dict[str, object] | None,
+        contracts: dict[str, object],
+    ) -> dict[str, object]:
+        return {"version": 2, "schema": schema, "contracts": contracts}
+
+    @classmethod
+    def _install_contract_blueprint(
+        cls,
+        project: Path,
+        *,
+        actor: str,
+        task_id: str,
+        contracts: dict[str, object],
+    ):
+        return set_blueprint(
+            project,
+            actor=actor,
+            task_id=task_id,
+            blueprint=cls._blueprint(None, contracts),
+        )
 
     @staticmethod
     def _kernel_state(project: Path) -> dict[str, object]:

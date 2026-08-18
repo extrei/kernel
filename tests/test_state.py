@@ -63,12 +63,11 @@ class StateTests(unittest.TestCase):
             self.assertEqual(self._kernel_state(project)["state_head"], second.state)
 
             entry = self._object_json(project, second.entry_hash)
-            self.assertEqual(entry["version"], 4)
+            self.assertEqual(entry["version"], 5)
             self.assertEqual(entry["payload_hash"], second.patch_hash)
             self.assertEqual(entry["parent_state"], first.state)
             self.assertEqual(entry["state"], second.state)
-            self.assertIsNone(entry["schema"])
-            self.assertIsNone(entry["contracts"])
+            self.assertIsNone(entry["blueprint"])
             self.assertIsNone(entry["view"])
 
     def test_remove_has_no_caller_supplied_privilege(self) -> None:
@@ -103,7 +102,7 @@ class StateTests(unittest.TestCase):
                     allow_remove=True,
                 )
 
-    def test_stale_parent_leaves_all_durable_heads_unchanged(self) -> None:
+    def test_stale_parent_records_rejection_without_advancing_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
@@ -119,8 +118,13 @@ class StateTests(unittest.TestCase):
                     patch=[{"op": "add", "path": "/bad", "value": True}],
                 )
 
-            self.assertEqual(self._kernel_state(project), before)
-            self.assertEqual(set(self._object_directory(project).iterdir()), objects_before)
+            after = self._kernel_state(project)
+            self.assertEqual(after["state_head"], before["state_head"])
+            self.assertEqual(after["blueprint_head"], before["blueprint_head"])
+            self.assertEqual(after["revision"], before["revision"] + 1)
+            self.assertLess(
+                len(objects_before), len(set(self._object_directory(project).iterdir()))
+            )
 
     def test_artifact_step_annotates_unchanged_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

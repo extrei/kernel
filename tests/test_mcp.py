@@ -8,7 +8,7 @@ import unittest
 
 from mcp import Client
 
-from kernel import apply_patch, set_contracts
+from kernel import apply_patch, entries, set_blueprint, state
 from kernel.kernel import initialize
 from kernel.mcp import create_server
 
@@ -30,16 +30,30 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             tools = {tool.name: tool for tool in listed.tools}
             self.assertEqual(
                 set(tools),
-                {"get_view", "kernel_status", "read_artifact", "submit_step"},
+                {
+                    "get_view",
+                    "kernel_status",
+                    "read_artifact",
+                    "submit_patch",
+                    "submit_step",
+                },
             )
             self.assertTrue(tools["get_view"].annotations.read_only_hint)
             self.assertTrue(tools["kernel_status"].annotations.read_only_hint)
             self.assertTrue(tools["read_artifact"].annotations.read_only_hint)
             self.assertFalse(tools["submit_step"].annotations.read_only_hint)
+            self.assertFalse(tools["submit_patch"].annotations.read_only_hint)
             self.assertNotIn("actor", tools["submit_step"].input_schema["properties"])
             self.assertNotIn("project", tools["submit_step"].input_schema["properties"])
             self.assertIn("kind", tools["submit_step"].input_schema["required"])
             self.assertNotIn("actor", tools["get_view"].input_schema["properties"])
+
+            patch_properties = tools["submit_patch"].input_schema["properties"]
+            self.assertNotIn("actor", patch_properties)
+            self.assertNotIn("project", patch_properties)
+            # kind stays unexposed so an agent cannot forge a "rejection" entry,
+            # which kernel.circuit counts when deciding to halt.
+            self.assertNotIn("kind", patch_properties)
 
             status = await client.call_tool("kernel_status", {})
             self.assertFalse(status.is_error)
@@ -82,15 +96,19 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 {"op": "add", "path": "/secret", "value": "hidden"},
             ],
         )
-        set_contracts(
+        set_blueprint(
             self.project,
             actor="human",
             task_id="mcp-view",
-            contracts={
+            blueprint={
+                "version": 2,
+                "schema": None,
+                "contracts": {
                 "version": 2,
                 "actors": {
                     "claude": {"read": ["/public"], "write": ["/public"]},
                     "glm": {"read": ["/secret"], "write": ["/secret"]},
+                },
                 },
             },
         )
@@ -102,9 +120,125 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_error)
         record = result.structured_content
         self.assertEqual(record["actor"], "claude")
+        self.assertIn("blueprint", record)
+        self.assertNotIn("contracts", record)
+        self.assertNotIn("schema", record)
         self.assertEqual(record["document"], {"public": "visible"})
         self.assertEqual(record["state"], base.state)
         self.assertTrue(record["view_hash"].startswith("sha256:"))
+
+    async def test_view_then_patch_closes_the_agent_loop(self) -> None:
+        self._install_two_actor_blueprint()
+        server = create_server(self.project, "claude")
+
+        async with Client(server) as client:
+            seen = (await client.call_tool("get_view", {})).structured_content
+            submitted = await client.call_tool(
+                "submit_patch",
+                {
+                    "task_id": "mcp-patch",
+                    "parent_state": seen["state"],
+                    "view": seen["view_hash"],
+                    "patch": [
+                        {"op": "replace", "path": "/public", "value": "written"}
+                    ],
+                },
+            )
+
+        self.assertFalse(submitted.is_error)
+        record = submitted.structured_content
+        self.assertEqual(record["actor"], "claude")
+        self.assertEqual(record["kind"], "patch")
+        self.assertEqual(record["parent_state"], seen["state"])
+        self.assertEqual(record["view"], seen["view_hash"])
+        self.assertEqual(state(self.project)["public"], "written")
+
+    async def test_patch_outside_the_actor_write_contract_is_refused(self) -> None:
+        self._install_two_actor_blueprint()
+        before = self._kernel_state()
+        server = create_server(self.project, "claude")
+
+        async with Client(server) as client:
+            seen = (await client.call_tool("get_view", {})).structured_content
+            result = await client.call_tool(
+                "submit_patch",
+                {
+                    "task_id": "mcp-patch",
+                    "parent_state": seen["state"],
+                    "view": seen["view_hash"],
+                    "patch": [
+                        {"op": "replace", "path": "/secret", "value": "stolen"}
+                    ],
+                },
+            )
+
+        self.assertTrue(result.is_error)
+        after = self._kernel_state()
+        self.assertEqual(after["state_head"], before["state_head"])
+        self.assertEqual(state(self.project)["secret"], "hidden")
+        # The refusal is a fact, attributed to the bound actor.
+        refusal = entries(self.project)[-1]
+        self.assertEqual(refusal["kind"], "rejection")
+        self.assertEqual(refusal["actor"], "claude")
+
+    async def test_patch_from_a_superseded_state_is_refused(self) -> None:
+        self._install_two_actor_blueprint()
+        server = create_server(self.project, "claude")
+
+        async with Client(server) as client:
+            seen = (await client.call_tool("get_view", {})).structured_content
+            apply_patch(
+                self.project,
+                actor="setup",
+                task_id="mcp-race",
+                parent_state=seen["state"],
+                patch=[{"op": "replace", "path": "/public", "value": "moved"}],
+            )
+            result = await client.call_tool(
+                "submit_patch",
+                {
+                    "task_id": "mcp-patch",
+                    "parent_state": seen["state"],
+                    "view": seen["view_hash"],
+                    "patch": [
+                        {"op": "replace", "path": "/public", "value": "late"}
+                    ],
+                },
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(state(self.project)["public"], "moved")
+
+    def _install_two_actor_blueprint(self) -> None:
+        apply_patch(
+            self.project,
+            actor="setup",
+            task_id="mcp-setup",
+            parent_state=self._kernel_state()["state_head"],
+            patch=[
+                {"op": "add", "path": "/public", "value": "visible"},
+                {"op": "add", "path": "/secret", "value": "hidden"},
+            ],
+        )
+        set_blueprint(
+            self.project,
+            actor="human",
+            task_id="mcp-setup",
+            blueprint={
+                "version": 2,
+                "schema": None,
+                "contracts": {
+                    "version": 2,
+                    "actors": {
+                        "claude": {"read": ["/public"], "write": ["/public"]},
+                        "setup": {
+                            "read": ["/public", "/secret"],
+                            "write": ["/public", "/secret"],
+                        },
+                    },
+                },
+            },
+        )
 
     async def test_binary_artifact_is_returned_as_base64(self) -> None:
         content = b"\x00\xff\x10binary"

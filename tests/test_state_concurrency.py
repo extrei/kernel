@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from kernel import StaleParentError, apply_patch, state
+from kernel import StaleParentError, apply_patch, entries, state
 from kernel.kernel import initialize, verify
 
 
@@ -47,7 +47,11 @@ class ConcurrentStateTests(unittest.TestCase):
             kernel_state = json.loads(
                 (project / ".state-tree" / "kernel.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(kernel_state["revision"], 1)
+            self.assertEqual(kernel_state["revision"], 2)
+            self.assertEqual(
+                [entry["kind"] for entry in entries(project)],
+                ["patch", "rejection"],
+            )
             self.assertIn(state(project)["winner"], {"agent-1", "agent-2"})
             self.assertEqual(verify(project, strict=True), kernel_state["ledger_head"])
 

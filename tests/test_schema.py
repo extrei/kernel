@@ -5,11 +5,12 @@ import tempfile
 import unittest
 
 from kernel import (
+    BlueprintError,
     SchemaError,
     apply_patch,
     audit_schema,
     schema,
-    set_schema,
+    set_blueprint,
     state,
     validate,
 )
@@ -34,7 +35,7 @@ class SchemaTests(unittest.TestCase):
 
             self.assertIsNone(schema(project))
             self.assertEqual(state(project), {"anything": [1, "two"]})
-            self.assertIsNone(self._entry(project, record.entry_hash)["schema"])
+            self.assertIsNone(self._entry(project, record.entry_hash)["blueprint"])
 
     def test_invalid_patch_leaves_heads_and_objects_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -48,7 +49,7 @@ class SchemaTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/count", "value": 1}],
             )
-            set_schema(
+            self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="schema-gate",
@@ -57,6 +58,7 @@ class SchemaTests(unittest.TestCase):
                     "properties": {"count": {"type": "integer"}},
                     "required": ["count"],
                 },
+                paths=["/count"],
             )
             before_state = self._kernel_state(project)
             before_objects = set(self._object_directory(project).iterdir())
@@ -72,8 +74,15 @@ class SchemaTests(unittest.TestCase):
                     ],
                 )
 
-            self.assertEqual(self._kernel_state(project), before_state)
-            self.assertEqual(set(self._object_directory(project).iterdir()), before_objects)
+            after_state = self._kernel_state(project)
+            self.assertEqual(after_state["state_head"], before_state["state_head"])
+            self.assertEqual(
+                after_state["blueprint_head"], before_state["blueprint_head"]
+            )
+            self.assertEqual(after_state["revision"], before_state["revision"] + 1)
+            self.assertLess(
+                len(before_objects), len(set(self._object_directory(project).iterdir()))
+            )
 
     def test_schema_cannot_invalidate_the_live_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -90,8 +99,8 @@ class SchemaTests(unittest.TestCase):
             before_state = self._kernel_state(project)
             before_objects = set(self._object_directory(project).iterdir())
 
-            with self.assertRaises(SchemaError):
-                set_schema(
+            with self.assertRaises(BlueprintError):
+                self._install_schema_blueprint(
                     project,
                     actor="human",
                     task_id="live-state",
@@ -111,8 +120,8 @@ class SchemaTests(unittest.TestCase):
             initialize(project)
             before_objects = set(self._object_directory(project).iterdir())
 
-            with self.assertRaisesRegex(SchemaError, "invalid Draft 2020-12"):
-                set_schema(
+            with self.assertRaisesRegex(BlueprintError, "invalid Draft 2020-12"):
+                self._install_schema_blueprint(
                     project,
                     actor="human",
                     task_id="bad-schema",
@@ -122,14 +131,14 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(set(self._object_directory(project).iterdir()), before_objects)
             self.assertEqual(self._kernel_state(project)["revision"], 0)
 
-    def test_schema_change_is_an_unchanged_state_commit_and_can_clear(self) -> None:
+    def test_blueprint_change_is_an_unchanged_state_commit_and_can_clear(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
             genesis = self._kernel_state(project)["state_head"]
             definition = {"type": "object", "additionalProperties": True}
 
-            record = set_schema(
+            record = self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="schema-change",
@@ -138,34 +147,33 @@ class SchemaTests(unittest.TestCase):
 
             kernel_state = self._kernel_state(project)
             entry = self._entry(project, record.entry_hash)
-            self.assertEqual(kernel_state["schema_head"], record.schema)
-            self.assertEqual(record.payload_hash, record.schema)
-            self.assertEqual(entry["kind"], "schema")
+            self.assertEqual(kernel_state["blueprint_head"], record.blueprint)
+            self.assertEqual(record.payload_hash, record.blueprint)
+            self.assertEqual(entry["kind"], "blueprint")
             self.assertEqual(entry["parent_state"], genesis)
             self.assertEqual(entry["state"], genesis)
-            self.assertEqual(entry["schema"], record.schema)
-            self.assertEqual(entry["version"], 4)
-            self.assertIsNone(entry["contracts"])
+            self.assertEqual(entry["blueprint"], record.blueprint)
+            self.assertEqual(entry["version"], 5)
             self.assertEqual(schema(project), definition)
 
-            cleared = set_schema(
+            cleared = set_blueprint(
                 project,
                 actor="human",
                 task_id="schema-change",
-                schema=None,
+                blueprint=None,
             )
             cleared_entry = self._entry(project, cleared.entry_hash)
-            self.assertIsNone(cleared.schema)
-            self.assertIsNone(cleared_entry["schema"])
+            self.assertIsNone(cleared.blueprint)
+            self.assertIsNone(cleared_entry["blueprint"])
             self.assertEqual(cleared_entry["parent_state"], genesis)
             self.assertEqual(cleared_entry["state"], genesis)
-            self.assertIsNone(self._kernel_state(project)["schema_head"])
+            self.assertIsNone(self._kernel_state(project)["blueprint_head"])
 
     def test_artifact_entry_records_the_schema_in_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            schema_record = set_schema(
+            blueprint_record = self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="artifact-schema",
@@ -183,7 +191,7 @@ class SchemaTests(unittest.TestCase):
             )
 
             entry = self._entry(project, step.entry_hash)
-            self.assertEqual(entry["schema"], schema_record.schema)
+            self.assertEqual(entry["blueprint"], blueprint_record.blueprint)
             self.assertEqual(entry["parent_state"], entry["state"])
 
     def test_history_keeps_its_schema_and_audit_uses_entry_schema(self) -> None:
@@ -198,7 +206,7 @@ class SchemaTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/phase", "value": "draft"}],
             )
-            first_schema = set_schema(
+            first_blueprint = self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="schema-history",
@@ -207,6 +215,7 @@ class SchemaTests(unittest.TestCase):
                     "properties": {"phase": {"enum": ["draft", "done"]}},
                     "required": ["phase"],
                 },
+                paths=["/phase"],
             )
             done = apply_patch(
                 project,
@@ -215,7 +224,7 @@ class SchemaTests(unittest.TestCase):
                 parent_state=draft.state,
                 patch=[{"op": "replace", "path": "/phase", "value": "done"}],
             )
-            second_schema = set_schema(
+            second_blueprint = self._install_schema_blueprint(
                 project,
                 actor="human",
                 task_id="schema-history",
@@ -224,31 +233,64 @@ class SchemaTests(unittest.TestCase):
                     "properties": {"phase": {"const": "done"}},
                     "required": ["phase"],
                 },
+                paths=["/phase"],
             )
 
             with self.assertRaises(SchemaError):
                 validate(state(project, at=draft.state), schema(project))
             self.assertEqual(
-                self._entry(project, done.entry_hash)["schema"], first_schema.schema
+                self._entry(project, done.entry_hash)["blueprint"],
+                first_blueprint.blueprint,
             )
             self.assertEqual(
-                self._entry(project, second_schema.entry_hash)["schema"],
-                second_schema.schema,
+                self._entry(project, second_blueprint.entry_hash)["blueprint"],
+                second_blueprint.blueprint,
             )
-            self.assertEqual(verify(project, strict=True), second_schema.entry_hash)
+            self.assertEqual(verify(project, strict=True), second_blueprint.entry_hash)
 
             audit = audit_schema(project)
             self.assertEqual([result["sequence"] for result in audit], [1, 2, 3, 4])
             self.assertTrue(all(result["valid"] for result in audit))
             self.assertEqual(
-                [result["schema"] for result in audit],
-                [None, first_schema.schema, first_schema.schema, second_schema.schema],
+                [result["blueprint"] for result in audit],
+                [
+                    None,
+                    first_blueprint.blueprint,
+                    first_blueprint.blueprint,
+                    second_blueprint.blueprint,
+                ],
             )
 
             cache = project / ".state-tree" / "cache"
             shutil.rmtree(cache)
-            self.assertEqual(verify(project), second_schema.entry_hash)
+            self.assertEqual(verify(project), second_blueprint.entry_hash)
             self.assertTrue((cache / "verified").is_file())
+
+    @staticmethod
+    def _install_schema_blueprint(
+        project: Path,
+        *,
+        actor: str,
+        task_id: str,
+        schema: dict[str, object],
+        paths: list[str] | None = None,
+    ):
+        grants = [] if paths is None else paths
+        return set_blueprint(
+            project,
+            actor=actor,
+            task_id=task_id,
+            blueprint={
+                "version": 2,
+                "schema": schema,
+                "contracts": {
+                    "version": 2,
+                    "actors": {
+                        "codex": {"read": grants, "write": grants}
+                    },
+                },
+            },
+        )
 
     @staticmethod
     def _kernel_state(project: Path) -> dict[str, object]:

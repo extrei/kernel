@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .contracts import _read_contract_object, authorize
+from .blueprint import _blueprint_authorities, _read_blueprint_object
+from .contracts import UnauthorizedWriteError, authorize
 from .jsonpatch import PatchError, apply_patch as apply_json_patch, touched_paths
 from .kernel import (
     STATE_TREE_DIRECTORY,
@@ -23,9 +24,9 @@ from .kernel import (
     _validated_kernel_state,
 )
 from .schema import (
+    SchemaError,
     _externalize_collections,
     _hydrate_collections,
-    _read_schema_object,
     validate,
 )
 from .views import (
@@ -38,6 +39,7 @@ from .views import (
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _KIND = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+_REJECTION_VERSION = 1
 
 
 class StaleParentError(StateTreeError):
@@ -90,76 +92,186 @@ def apply_patch(
         raise PatchError(
             "kind must be 1-32 letters, digits, dots, hyphens, or underscores"
         )
-    patch_paths = touched_paths(patch)
-
     root = _resolve_project_root(project_root)
     state_tree = root / STATE_TREE_DIRECTORY
     with _kernel_lock(state_tree):
         kernel_state = _validated_kernel_state(state_tree)
-        if parent_state != kernel_state["state_head"]:
-            raise StaleParentError(
-                f"parent state {parent_state!r} is not current state {kernel_state['state_head']!r}"
-            )
-
         object_directory = _object_directory(state_tree)
-        contracts_reference = kernel_state["contracts_head"]
-        current_contract = _read_contract_object(
-            object_directory, contracts_reference
+
+        try:
+            patch_paths = touched_paths(patch)
+        except PatchError as error:
+            try:
+                patch_hash = _store_candidate_patch(object_directory, patch)
+            except Exception:
+                pass
+            else:
+                _record_rejection_best_effort(
+                    state_tree,
+                    kernel_state,
+                    actor=actor,
+                    task_id=task_id,
+                    patch_hash=patch_hash,
+                    paths=[],
+                    reason=str(error),
+                    stage="syntax",
+                    view=view,
+                )
+            raise
+
+        patch_hash = _store_candidate_patch(object_directory, patch)
+
+        try:
+            if parent_state != kernel_state["state_head"]:
+                raise StaleParentError(
+                    f"parent state {parent_state!r} is not current state "
+                    f"{kernel_state['state_head']!r}"
+                )
+        except StaleParentError as error:
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(error),
+                stage="stale_parent",
+                view=view,
+            )
+            raise
+
+        blueprint_reference = kernel_state["blueprint_head"]
+        current_blueprint = _read_blueprint_object(
+            object_directory, blueprint_reference
         )
-        authorize(patch_paths, current_contract, actor=actor)
+        current_schema, current_contract = _blueprint_authorities(
+            current_blueprint
+        )
+        try:
+            authorize(patch_paths, current_contract, actor=actor)
+        except UnauthorizedWriteError as error:
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(error),
+                stage="auth",
+                view=view,
+            )
+            raise
         allow_remove = any(
             operation == "remove" for operation, _ in patch_paths
         )
 
-        schema_reference = kernel_state["schema_head"]
-        current_schema = _read_schema_object(object_directory, schema_reference)
         stored_current = _read_snapshot_object(
             object_directory, parent_state, label="parent state"
         )
-        if current_contract is not None:
-            if view is None and _view_required(current_contract, actor):
-                raise ViewError("active contract budget requires a view")
-            if view is not None:
-                expected_view = _view_reference(
-                    derive_view(
-                        stored_current,
-                        current_contract,
-                        current_schema,
-                        actor,
+        try:
+            if current_contract is not None:
+                if view is None and _view_required(current_contract, actor):
+                    raise ViewError("active contract budget requires a view")
+                if view is not None:
+                    expected_view = _view_reference(
+                        derive_view(
+                            stored_current,
+                            current_contract,
+                            current_schema,
+                            actor,
+                        )
                     )
+                    if view != expected_view:
+                        raise StaleViewError(
+                            "supplied view does not match the current parent state"
+                        )
+                    try:
+                        _read_json_mapping_object(
+                            object_directory, view, label="view"
+                        )
+                    except StateTreeError as error:
+                        raise StaleViewError(
+                            "supplied view object is unavailable or invalid"
+                        ) from error
+            elif view is not None:
+                _read_json_mapping_object(
+                    object_directory, view, label="view"
                 )
-                if view != expected_view:
-                    raise StaleViewError(
-                        "supplied view does not match the current parent state"
-                    )
-                try:
-                    _read_json_mapping_object(
-                        object_directory, view, label="view"
-                    )
-                except StateTreeError as error:
-                    raise StaleViewError(
-                        "supplied view object is unavailable or invalid"
-                    ) from error
-        elif view is not None:
-            _read_json_mapping_object(object_directory, view, label="view")
+        except StateTreeError as error:
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(error),
+                stage="view",
+                view=view,
+            )
+            raise
 
         current = _hydrate_collections(stored_current, object_directory)
-        next_snapshot = apply_json_patch(current, patch, allow_remove=allow_remove)
-        if not isinstance(next_snapshot, dict):
-            raise PatchError("state snapshot must remain a JSON object")
-
-        validate(next_snapshot, current_schema)
-        stored_snapshot = _externalize_collections(
-            next_snapshot, current_schema, object_directory
-        )
+        try:
+            next_snapshot = apply_json_patch(
+                current, patch, allow_remove=allow_remove
+            )
+            if not isinstance(next_snapshot, dict):
+                raise PatchError("state snapshot must remain a JSON object")
+        except PatchError as error:
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(error),
+                stage="apply",
+                view=view,
+            )
+            raise
 
         try:
-            patch_content = _canonical_json_bytes(patch)
+            validate(next_snapshot, current_schema)
+            stored_snapshot = _externalize_collections(
+                next_snapshot, current_schema, object_directory
+            )
+        except SchemaError as error:
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(error),
+                stage="schema",
+                view=view,
+            )
+            raise
+
+        try:
             state_content = _canonical_json_bytes(stored_snapshot)
         except (TypeError, ValueError) as error:
-            raise PatchError("patch and state must contain canonical JSON values") from error
+            patch_error = PatchError(
+                "patch and state must contain canonical JSON values"
+            )
+            _record_rejection_best_effort(
+                state_tree,
+                kernel_state,
+                actor=actor,
+                task_id=task_id,
+                patch_hash=patch_hash,
+                paths=patch_paths,
+                reason=str(patch_error),
+                stage="apply",
+                view=view,
+            )
+            raise patch_error from error
 
-        patch_hash = _store_object_at(object_directory, patch_content)
         state_hash = _store_object_at(object_directory, state_content)
         append = _append_ledger_entry_locked(
             state_tree,
@@ -171,8 +283,7 @@ def apply_patch(
             metadata={},
             parent_state=parent_state,
             state=state_hash,
-            schema=schema_reference,
-            contracts=contracts_reference,
+            blueprint=blueprint_reference,
             view=view,
         )
 
@@ -188,6 +299,58 @@ def apply_patch(
         entry_hash=append.entry_hash,
         sequence=append.sequence,
     )
+
+
+def _store_candidate_patch(object_directory: Path, patch: Any) -> str:
+    try:
+        content = _canonical_json_bytes(patch)
+    except (TypeError, ValueError) as error:
+        raise PatchError(
+            "patch and state must contain canonical JSON values"
+        ) from error
+    return _store_object_at(object_directory, content)
+
+
+def _record_rejection_best_effort(
+    state_tree: Path,
+    kernel_state: dict[str, Any],
+    *,
+    actor: str,
+    task_id: str,
+    patch_hash: str,
+    paths: list[tuple[str, str]],
+    reason: str,
+    stage: str,
+    view: str | None,
+) -> None:
+    try:
+        object_directory = _object_directory(state_tree)
+        rejection = {
+            "patch": patch_hash,
+            "paths": [list(path) for path in paths],
+            "reason": reason,
+            "stage": stage,
+            "version": _REJECTION_VERSION,
+        }
+        rejection_hash = _store_object_at(
+            object_directory, _canonical_json_bytes(rejection)
+        )
+        current_state = kernel_state["state_head"]
+        _append_ledger_entry_locked(
+            state_tree,
+            kernel_state,
+            actor=actor,
+            kind="rejection",
+            task_id=task_id,
+            payload_hash=rejection_hash,
+            metadata={},
+            parent_state=current_state,
+            state=current_state,
+            blueprint=kernel_state["blueprint_head"],
+            view=view,
+        )
+    except Exception:
+        return
 
 
 def _validate_identifier(value: str, *, label: str) -> None:

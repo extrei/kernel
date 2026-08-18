@@ -9,11 +9,15 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .blueprint import (
+    BlueprintError,
+    _blueprint_authorities,
+    _read_blueprint_object,
+)
 from .contracts import (
     ContractError,
     _check_contract,
     _pattern_matches,
-    _read_contract_object,
 )
 from .jsonpatch import PatchError, _pointer_tokens
 from .kernel import (
@@ -29,7 +33,7 @@ from .kernel import (
     _validated_kernel_state,
     entries,
 )
-from .schema import _read_schema_object, _resolve_schema_node
+from .schema import _resolve_schema_node
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _MISSING = object()
@@ -54,8 +58,7 @@ class ViewRecord:
     document: dict[str, Any]
     view_hash: str
     state: str
-    contracts: str | None
-    schema: str | None
+    blueprint: str | None
 
 
 def view(
@@ -76,12 +79,11 @@ def view(
         snapshot = _read_snapshot_object(
             object_directory, state_reference, label="view state"
         )
-        contracts_reference = kernel_state["contracts_head"]
-        schema_reference = kernel_state["schema_head"]
-        contract = _read_contract_object(
-            object_directory, contracts_reference
+        blueprint_reference = kernel_state["blueprint_head"]
+        current_blueprint = _read_blueprint_object(
+            object_directory, blueprint_reference
         )
-        schema = _read_schema_object(object_directory, schema_reference)
+        schema, contract = _blueprint_authorities(current_blueprint)
         document, elisions = _derive_view(snapshot, contract, schema, actor)
 
         for reference, content in sorted(elisions.items()):
@@ -97,8 +99,7 @@ def view(
         document=document,
         view_hash=view_hash,
         state=state_reference,
-        contracts=contracts_reference,
-        schema=schema_reference,
+        blueprint=blueprint_reference,
     )
 
 
@@ -126,19 +127,17 @@ def audit_views(project_root: str | Path) -> list[dict[str, Any]]:
         expected: str | None = None
         message: str | None = None
         valid = True
-        if is_patch and entry["contracts"] is not None:
+        if is_patch and entry["blueprint"] is not None:
             try:
                 snapshot = _read_snapshot_object(
                     object_directory,
                     entry["parent_state"],
                     label=f"ledger sequence {entry['sequence']} parent state",
                 )
-                contract = _read_contract_object(
-                    object_directory, entry["contracts"]
+                entry_blueprint = _read_blueprint_object(
+                    object_directory, entry["blueprint"]
                 )
-                schema = _read_schema_object(
-                    object_directory, entry["schema"]
-                )
+                schema, contract = _blueprint_authorities(entry_blueprint)
                 document = derive_view(
                     snapshot, contract, schema, entry["actor"]
                 )
@@ -150,7 +149,7 @@ def audit_views(project_root: str | Path) -> list[dict[str, Any]]:
                 elif entry["view"] != expected:
                     valid = False
                     message = "recorded view does not match its parent state"
-            except ViewError as error:
+            except (BlueprintError, ViewError) as error:
                 valid = False
                 message = str(error)
         results.append(

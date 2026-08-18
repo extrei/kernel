@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any
@@ -16,11 +15,8 @@ from .jsonpatch import PatchError, _array_index, _pointer_tokens
 from .kernel import (
     STATE_TREE_DIRECTORY,
     StateTreeError,
-    _GENESIS_STATE_REFERENCE,
-    _append_ledger_entry_locked,
     _canonical_json_bytes,
     _is_collection_reference,
-    _kernel_lock,
     _object_directory,
     _read_collection_object,
     _read_json_mapping_object,
@@ -59,89 +55,13 @@ class SchemaError(StateTreeError):
     """Raised when a schema or candidate snapshot is not acceptable."""
 
 
-@dataclass(frozen=True)
-class SchemaRecord:
-    """The durable identities produced by one schema change."""
-
-    project_root: Path
-    actor: str
-    task_id: str
-    schema: str | None
-    payload_hash: str
-    entry_hash: str
-    sequence: int
-
-
 def schema(project_root: str | Path) -> dict[str, Any] | None:
     """Return the Draft 2020-12 schema currently in force, if any."""
 
-    root = _resolve_project_root(project_root)
-    state_tree = root / STATE_TREE_DIRECTORY
-    kernel_state = _validated_kernel_state(state_tree)
-    return _read_schema_object(
-        _object_directory(state_tree), kernel_state["schema_head"]
-    )
+    from .blueprint import _blueprint_authorities, blueprint
 
-
-def set_schema(
-    project_root: str | Path,
-    *,
-    actor: str,
-    task_id: str,
-    schema: dict[str, Any] | None,
-) -> SchemaRecord:
-    """Validate and atomically place a schema in force for future commits."""
-
-    _validate_identifier(actor, label="actor")
-    _validate_identifier(task_id, label="task id")
-    _check_schema(schema)
-
-    root = _resolve_project_root(project_root)
-    state_tree = root / STATE_TREE_DIRECTORY
-    with _kernel_lock(state_tree):
-        kernel_state = _validated_kernel_state(state_tree)
-        object_directory = _object_directory(state_tree)
-        current = _read_snapshot_object(
-            object_directory,
-            kernel_state["state_head"],
-            label="current state",
-        )
-        validate(_hydrate_collections(current, object_directory), schema)
-
-        if schema is None:
-            schema_reference = None
-            payload_hash = _GENESIS_STATE_REFERENCE
-        else:
-            payload_hash = _store_object_at(
-                object_directory, _canonical_json_bytes(schema)
-            )
-            schema_reference = payload_hash
-
-        append = _append_ledger_entry_locked(
-            state_tree,
-            kernel_state,
-            actor=actor,
-            kind="schema",
-            task_id=task_id,
-            payload_hash=payload_hash,
-            metadata={},
-            parent_state=kernel_state["state_head"],
-            state=kernel_state["state_head"],
-            schema=schema_reference,
-            contracts=kernel_state["contracts_head"],
-            view=None,
-            schema_transition=True,
-        )
-
-    return SchemaRecord(
-        project_root=root,
-        actor=actor,
-        task_id=task_id,
-        schema=schema_reference,
-        payload_hash=payload_hash,
-        entry_hash=append.entry_hash,
-        sequence=append.sequence,
-    )
+    current_schema, _ = _blueprint_authorities(blueprint(project_root))
+    return deepcopy(current_schema)
 
 
 def validate(
@@ -168,6 +88,12 @@ def audit_schema(project_root: str | Path) -> list[dict[str, Any]]:
     root = _resolve_project_root(project_root)
     ledger_entries = entries(root)
     object_directory = _object_directory(root / STATE_TREE_DIRECTORY)
+    from .blueprint import (
+        BlueprintError,
+        _blueprint_authorities,
+        _read_blueprint_object,
+    )
+
     results: list[dict[str, Any]] = []
     for entry in ledger_entries:
         document = _read_snapshot_object(
@@ -176,10 +102,13 @@ def audit_schema(project_root: str | Path) -> list[dict[str, Any]]:
             label=f"ledger sequence {entry['sequence']} state",
         )
         document = _hydrate_collections(document, object_directory)
-        entry_schema = _read_schema_object(object_directory, entry["schema"])
         try:
+            entry_blueprint = _read_blueprint_object(
+                object_directory, entry["blueprint"]
+            )
+            entry_schema, _ = _blueprint_authorities(entry_blueprint)
             validate(document, entry_schema)
-        except SchemaError as error:
+        except (BlueprintError, SchemaError) as error:
             valid = False
             message: str | None = str(error)
         else:
@@ -187,8 +116,8 @@ def audit_schema(project_root: str | Path) -> list[dict[str, Any]]:
             message = None
         results.append(
             {
+                "blueprint": entry["blueprint"],
                 "error": message,
-                "schema": entry["schema"],
                 "sequence": entry["sequence"],
                 "state": entry["state"],
                 "valid": valid,

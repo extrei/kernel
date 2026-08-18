@@ -2,7 +2,7 @@
 
 A small, local, append-only coordination ledger for agent work. Each project owns its own `.state-tree/`; runner skills remain outside this repository.
 
-The kernel records completed steps. It does not route agents, enforce transitions, decide outcomes, or depend on GitHub.
+The kernel records work, accepts or rejects state transitions, and derives advisory Circuit Verdicts and Schedules. It never dispatches agents, executes a Schedule, or depends on GitHub.
 
 ## Initialize a project
 
@@ -15,7 +15,7 @@ This creates the local ledger boundary:
 ```text
 .state-tree/
 ├── .gitignore              # excludes runtime state only
-├── kernel.json             # revision plus ledger, state, schema, contract heads
+├── kernel.json             # revision plus ledger, state, and Blueprint heads
 ├── kernel.lock             # ignored; recreated when a writer starts
 ├── cache/verified          # ignored, disposable verification checkpoint
 └── objects/
@@ -71,19 +71,39 @@ assert state(project) == {"status": "ready"}
 
 A competing write prepared from the same parent raises `StaleParentError`. `remove` is rejected unless the active write contract grants the path and sets `allow_remove` for the actor; there is no caller-supplied override. `move` and `copy` are unsupported.
 
-Every ledger v4 entry carries `parent_state`, `state`, nullable `view`, nullable `schema`, and nullable `contracts` references. Artifact-only steps set `parent_state == state`, explicitly recording that they do not change project state.
+Every ledger v5 entry carries `parent_state`, `state`, nullable `view`, and nullable `blueprint` references. Artifact-only steps set `parent_state == state`, explicitly recording that they do not change project state.
 
-`set_schema(...)` places a valid Draft 2020-12 schema in force only when the current Snapshot satisfies it. Later patches are rejected before object storage when their candidate Snapshot violates that schema. `verify(...)` remains structural; `audit_schema(...)` explicitly re-evaluates each historical Snapshot against the schema recorded on its own ledger entry.
+## Blueprint authority
+
+Schema and Write Contracts enter the kernel only as one versioned Blueprint:
+
+```json
+{
+  "version": 2,
+  "schema": {"type": "object"},
+  "contracts": {"version": 2, "actors": {}},
+  "rules": [
+    {"on": {"op": "add", "path": "/claims/*"}, "wake": "verifier"}
+  ],
+  "circuit": {"consecutive_rejections": 2, "cycle_window": 3}
+}
+```
+
+`rules` and `circuit` are optional. The circuit defaults shown above apply when its values are absent. `set_blueprint(...)` validates this document against the hand-written `meta_schema()`, checks the Draft 2020-12 Schema and version 2 Write Contracts together, validates every Workflow Rule and Circuit Policy, validates the current live Snapshot, and advances one `blueprint_head` in the same ledger commit. Blueprint version 1 is rejected. There are no independent Schema or Contract installation functions.
+
+`blueprint(...)` returns the authority document in force. `schema(...)` and `contracts(...)` are projections of it. Later patches are rejected before object storage when their candidate Snapshot violates the active Schema. `verify(...)` remains structural; `audit_schema(...)` explicitly re-evaluates each historical Snapshot through the Blueprint recorded on its own ledger entry.
 
 When a schema marks an array with `"x-kernel-collection": true`, the persisted Snapshot returned by `state()` contains `{"$collection":"sha256:…"}` at that path rather than the inlined array. Use `collection(project, pointer)` to resolve that array.
 
+A Blueprint is rejected when a declared Collection is unreachable through every actor's `read` and `write` patterns.
+
 The exact one-key `$collection` object is reserved for this reference form.
 
-`set_contracts(...)` places a version 2 actor-specific contract in force. `add`, `replace`, and `remove` require a matching `write` pattern; `test` requires a matching `read` pattern. Patterns match complete JSON Pointer segments, so `/plan` does not grant `/plan/status`, while `/plan/*` grants exactly one child segment. An active contract rejects actors it does not name.
+A version 2 Write Contract grants actor-specific authority. `add`, `replace`, and `remove` require a matching `write` pattern; `test` requires a matching `read` pattern. Patterns match complete JSON Pointer segments, so `/plan` does not grant `/plan/status`, while `/plan/*` grants exactly one child segment. An active Blueprint rejects actors its Write Contract does not name.
 
-With no contract in force, non-removal patches remain allowed and `remove` fails closed. Authorization runs before collection hydration, patch evaluation, schema validation, or object storage. `verify(...)` checks contract objects structurally; `audit_contracts(...)` is the explicit human audit of historical patch authority.
+With no Blueprint in force, non-removal patches remain allowed and `remove` fails closed. Authorization runs before collection hydration, patch evaluation, schema validation, or Snapshot storage. The candidate Patch is retained first so a refusal remains auditable. `verify(...)` checks Blueprint objects structurally; `audit_contracts(...)` is the explicit human audit of historical patch authority.
 
-An actor rule may set a positive `budget`, measured in characters of canonical JSON. `view(project, actor=...)` derives and stores that actor's deterministic subdocument from the current Snapshot, Write Contract, and Schema. Visible schema fragments appear under `$schema`; Collection references remain opaque handles.
+An actor rule may set a positive `budget`, measured in characters of canonical JSON. `view(project, actor=...)` derives and stores that actor's deterministic subdocument from the current Snapshot and the Write Contract and Schema bound by one Blueprint. Visible schema fragments appear under `$schema`; Collection references remain opaque handles.
 
 When a View exceeds its budget, large visible entries are replaced deterministically with `{"$elided":{"bytes":N,"hash":"sha256:…"}}`. The hash resolves to the canonical original value through the existing object read path. If even the elided form cannot fit, View derivation fails.
 
@@ -92,6 +112,20 @@ The exact one-key `$elided` object is reserved for this View reference form.
 A budgeted actor must pass the derived View hash to `apply_patch(...)`. The kernel re-derives it from `parent_state` before hydration or patch evaluation; a mismatch raises `StaleViewError`. Unbudgeted contracts may omit the View, but any supplied contracted View is still checked. `verify(...)` remains structural, while `audit_views(...)` explicitly re-evaluates historical View bindings.
 
 Normal verification may reuse `.state-tree/cache/verified`; malformed, missing, or mismatched checkpoints fall back to genesis verification. `verify(project, strict=True)` always ignores the checkpoint. Deleting `.state-tree/cache/` is always safe.
+
+## Rejections, circuits, and schedules
+
+An attributable Patch refusal appends a ledger v5 `rejection` entry and re-raises the original exception. Its canonical payload records the candidate Patch hash, touched paths, reason, and one of six stages: `syntax`, `stale_parent`, `auth`, `view`, `apply`, or `schema`. A rejection advances the ledger revision but keeps `parent_state == state`, so neither the State Head nor Blueprint Head changes.
+
+`circuit(project)` derives a deterministic `CircuitVerdict` from accepted and rejected ledger facts. It can advise `continue`, `retry`, `switch_actor`, `tighten_budget`, or `halt`; it never performs that action. `schedule(project)` matches the newest accepted Patch against the active Blueprint's Workflow Rules and returns the implied actor events. It does not invoke, dispatch, retry, queue, or write anything.
+
+The same verdict is available to a human operator:
+
+```text
+state-tree circuit /path/to/project
+```
+
+`state-tree log` marks rejection entries with `[REJECTED]`. No circuit or scheduling surface is exposed through the worker MCP server.
 
 ## Record and read steps
 
@@ -108,12 +142,19 @@ Each line contains: sequence, timestamp, actor, kind, task ID, and payload hash.
 
 ## Local MCP server
 
-`kernel-mcp` exposes four tools over stdio:
+`kernel-mcp` exposes five tools over stdio:
 
 - `get_view`
+- `submit_patch`
 - `kernel_status`
 - `submit_step`
 - `read_artifact`
+
+`get_view` and `submit_patch` are the agent loop: read the bound actor's View, then propose a patch quoting the `state` and `view_hash` that View reported. The patch is refused unless it satisfies patch syntax, the actor's write contract, the view it was prepared from, patch application, and the blueprint schema. A refusal raises and is recorded in the ledger as a `rejection` entry attributed to that actor.
+
+`submit_patch` does not accept a `kind`; every entry it writes is a `patch`. Reserved kinds stay unreachable from an agent, so a worker cannot forge the `rejection` entries `state-tree circuit` counts.
+
+`submit_step` remains the path for raw project files — a verbatim result log is evidence, and forcing it into JSON would destroy what makes it evidence.
 
 The project and actor identity are fixed when the process starts and are not tool arguments. A project is required explicitly through `--project` or `KERNEL_PROJECT`:
 

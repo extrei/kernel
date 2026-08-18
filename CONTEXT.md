@@ -21,20 +21,44 @@ The reference to the current Snapshot accepted by the State Tree.
 _Avoid_: Latest cache, working copy
 
 **Schema**:
-A durable constraint defining which Snapshots may be accepted while it is in force.
+A constraint within a Blueprint defining which Snapshots may be accepted.
 _Avoid_: Validator, state model
 
-**Schema Head**:
-The reference to the Schema currently governing accepted Snapshots.
-_Avoid_: Current validator, schema cache
-
 **Write Contract**:
-A durable actor-specific grant defining which Snapshot paths may be read as Patch preconditions or written.
+A Blueprint's actor-specific grant defining which Snapshot paths may be read as Patch preconditions or written.
 _Avoid_: Prompt permission, role description
 
-**Contract Head**:
-The reference to the Write Contract currently governing Patch authority.
-_Avoid_: Permission cache, current role
+**Blueprint**:
+The indivisible authority document binding one Schema to its Write Contracts.
+_Avoid_: Workflow, prompt, separate policy bundle
+
+**Blueprint Head**:
+The reference to the Blueprint currently governing Snapshot acceptance and Patch authority.
+_Avoid_: Schema Head, Contract Head, policy cache
+
+**Meta-schema**:
+The structural contract a Blueprint must satisfy before its authority can be considered.
+_Avoid_: Project Schema, model prompt
+
+**Workflow Rule**:
+A Blueprint declaration relating one accepted Patch event to an actor that may respond.
+_Avoid_: Job, dispatch command, agent invocation
+
+**Circuit Policy**:
+A Blueprint's thresholds for interpreting refusal and repetition signals.
+_Avoid_: Retry loop, watcher, execution policy
+
+**Rejection Record**:
+A durable fact preserving an attributable Patch refusal without advancing the State Head.
+_Avoid_: Error log, failed Snapshot, discarded attempt
+
+**Circuit Verdict**:
+A deterministic advisory judgment derived from accepted and rejected ledger facts.
+_Avoid_: Dispatch decision, command, mutable status
+
+**Schedule**:
+The actor responses implied by Workflow Rules for one accepted Patch.
+_Avoid_: Queue, running workflow, background job
 
 **View**:
 A deterministic actor-specific subdocument of a Snapshot, constrained by its Write Contract and Schema.

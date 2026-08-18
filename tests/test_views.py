@@ -11,7 +11,7 @@ from kernel import (
     apply_patch,
     audit_views,
     derive_view,
-    set_contracts,
+    set_blueprint,
     view,
     verify,
 )
@@ -109,7 +109,7 @@ class ViewDerivationTests(unittest.TestCase):
                     }
                 ],
             )
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="view-budget",
@@ -177,7 +177,7 @@ class ViewDerivationTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/value", "value": "draft"}],
             )
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="view-binding",
@@ -204,8 +204,13 @@ class ViewDerivationTests(unittest.TestCase):
                         {"op": "replace", "path": "/value", "value": "ready"}
                     ],
                 )
-            self.assertEqual(self._kernel_state(project), before_state)
-            self.assertEqual(self._object_names(project), before_objects)
+            after_state = self._kernel_state(project)
+            self.assertEqual(after_state["state_head"], before_state["state_head"])
+            self.assertEqual(
+                after_state["blueprint_head"], before_state["blueprint_head"]
+            )
+            self.assertEqual(after_state["revision"], before_state["revision"] + 1)
+            self.assertLess(len(before_objects), len(self._object_names(project)))
 
             worker_view = view(project, actor="worker")
             committed = apply_patch(
@@ -233,7 +238,7 @@ class ViewDerivationTests(unittest.TestCase):
                 parent_state=genesis,
                 patch=[{"op": "add", "path": "/value", "value": 1}],
             )
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="stale-view",
@@ -285,7 +290,7 @@ class ViewDerivationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
-            set_contracts(
+            self._install_contract_blueprint(
                 project,
                 actor="human",
                 task_id="view-audit",
@@ -321,8 +326,7 @@ class ViewDerivationTests(unittest.TestCase):
                     metadata={},
                     parent_state=kernel_state["state_head"],
                     state=state_hash,
-                    schema=kernel_state["schema_head"],
-                    contracts=kernel_state["contracts_head"],
+                    blueprint=kernel_state["blueprint_head"],
                     view=forged_view,
                 )
 
@@ -334,6 +338,25 @@ class ViewDerivationTests(unittest.TestCase):
     @staticmethod
     def _contract(actors: dict[str, object]) -> dict[str, object]:
         return {"version": 2, "actors": actors}
+
+    @staticmethod
+    def _install_contract_blueprint(
+        project: Path,
+        *,
+        actor: str,
+        task_id: str,
+        contracts: dict[str, object],
+    ) -> None:
+        set_blueprint(
+            project,
+            actor=actor,
+            task_id=task_id,
+            blueprint={
+                "version": 2,
+                "schema": None,
+                "contracts": contracts,
+            },
+        )
 
     @staticmethod
     def _canonical(value: object) -> str:

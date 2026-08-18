@@ -33,12 +33,22 @@ class StateTreeInitializationTests(unittest.TestCase):
             state_tree = project / STATE_TREE_DIRECTORY
             state = json.loads((state_tree / KERNEL_STATE_FILE).read_text())
 
+            self.assertEqual(
+                set(state),
+                {
+                    "blueprint_head",
+                    "format",
+                    "format_version",
+                    "ledger_head",
+                    "revision",
+                    "state_head",
+                },
+            )
             self.assertEqual(state["format"], "state-tree")
             self.assertEqual(state["format_version"], 1)
             self.assertEqual(state["ledger_head"], f"sha256:{_GENESIS_HASH}")
             self.assertEqual(state["revision"], 0)
-            self.assertIsNone(state["contracts_head"])
-            self.assertIsNone(state["schema_head"])
+            self.assertIsNone(state["blueprint_head"])
             self.assertEqual(state["state_head"], f"sha256:{sha256(b'{}').hexdigest()}")
             object_directory = state_tree / OBJECTS_DIRECTORY / "sha256"
             self.assertTrue(object_directory.is_dir())

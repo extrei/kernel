@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 
+from .circuit import circuit
 from .kernel import StateTreeError, entries, initialize
 
 HANDOFF_CONTRACT = """
@@ -64,6 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="print only the last N entries",
     )
+
+    circuit_parser = commands.add_parser(
+        "circuit",
+        help="print the deterministic circuit verdict",
+    )
+    circuit_parser.add_argument(
+        "project",
+        nargs="?",
+        default=".",
+        help="existing project directory (default: current directory)",
+    )
     return parser
 
 
@@ -96,10 +109,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.limit is not None:
             ledger_entries = ledger_entries[-arguments.limit :] if arguments.limit else []
         for entry in ledger_entries:
+            marker = " [REJECTED]" if entry["kind"] == "rejection" else ""
             print(
                 f"{entry['sequence']} {entry['recorded_at']} {entry['actor']} "
                 f"{entry['kind']} {entry['task_id']} {entry['payload_hash']}"
+                f"{marker}"
             )
+        return 0
+
+    if arguments.command == "circuit":
+        try:
+            verdict = circuit(arguments.project)
+        except StateTreeError as error:
+            print(f"state-tree: {error}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "action": verdict.action,
+                    "reason": verdict.reason,
+                    "signals": verdict.signals,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
         return 0
 
     parser.error(f"Unknown command: {arguments.command}")
