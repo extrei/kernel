@@ -175,7 +175,7 @@ This binds attribution at the MCP boundary; it is not an operating-system securi
 
 ## Model runner
 
-`kernel-run` is a separate top-level package over the public kernel interface. The kernel still never invokes a model. The runner asks an API-only Architect for a Blueprint, lets the kernel validate and install it, then submits View-bound worker Patches until the Circuit Verdict halts or the step budget is exhausted.
+`kernel-run` is a separate top-level package over the public kernel interface. The kernel still never invokes a model. The runner asks a Fable 5 API Architect for a Blueprint, lets the kernel validate and install it, then submits View-bound worker Patches until the Circuit Verdict halts or the step budget is exhausted.
 
 ```text
 kernel-run /path/to/project --task "Implement the accepted task" --task-id task-1
@@ -186,10 +186,13 @@ Worker providers:
 
 - `--provider api` is the default. It uses a bare `anthropic.Anthropic()` credential chain, `claude-opus-5`, adaptive thinking, high effort, and API token billing. The runner never prompts for a key.
 - `--provider claude-code` runs `claude -p` with JSON output and Claude Code's reported usage and cost. The Architect still uses the API provider.
+- `--provider codex` runs `codex exec` with `gpt-5.6-sol`, max reasoning, a mandatory read-only sandbox, and a JSON Patch output schema. It reports CLI token usage when available but does not guess a dollar cost.
 
 For Claude Code subscription billing, leave `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` unset and authenticate the CLI interactively. Exporting either variable routes Claude Code through API credentials instead. The runner does not branch on or rewrite the credential environment.
 
 Claude Code receives only the configured kernel MCP tool allowlist and is never launched with `--dangerously-skip-permissions`. This is a guardrail, not a security boundary: OS-level filesystem sandboxing is still required to prevent a worker process from reading or deleting `.state-tree/` through another path.
+
+Codex workers run with `--sandbox read-only` and never receive either Codex sandbox-bypass flag. Authenticate the worker account separately with `codex login`; `~/.anthropic.env` covers only the Fable 5 Architect, whose usage is billed to the Anthropic API key. Claude Fable 5 requires 30-day data retention and returns `400 invalid_request_error` for a workspace that remains under zero-data-retention, so verify that workspace setting before the first run.
 
 The result reports worker input and output tokens, provider cost when known, accepted and rejected attempts, and final State. API measurements describe this architecture directly. Claude Code measurements also include its own system prompt, tools, and project instructions.
 

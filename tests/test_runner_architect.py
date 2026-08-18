@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from kernel import BlueprintError, blueprint, entries, initialize
 from runner.architect import compose, install
-from runner.providers import Completion
+from runner.providers import Completion, ProviderError
 
 
 class _FakeProvider:
@@ -24,6 +24,20 @@ class _FakeProvider:
     def complete(self, **arguments: object) -> Completion:
         self.calls.append(arguments)
         return Completion(next(self.texts), 10, 5, 0.000175)
+
+
+class _RefusingProvider:
+    name = "api"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def preflight(self) -> None:
+        return None
+
+    def complete(self, **arguments: object) -> Completion:
+        self.calls += 1
+        raise ProviderError("Anthropic API refused completion (cyber)")
 
 
 class RunnerArchitectTests(unittest.TestCase):
@@ -80,6 +94,22 @@ class RunnerArchitectTests(unittest.TestCase):
             self.assertEqual(result, document)
             self.assertEqual(provider.preflight_calls, 1)
             self.assertIn("output_schema", factory.call_args.kwargs)
+            self.assertEqual(factory.call_args.kwargs["model"], "claude-fable-5")
+            self.assertEqual(factory.call_args.kwargs["effort"], "xhigh")
+            self.assertIsNone(blueprint(project))
+            self.assertEqual(entries(project), [])
+
+    def test_provider_refusal_does_not_consume_blueprint_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            initialize(project)
+            provider = _RefusingProvider()
+
+            with patch("runner.architect.APIProvider", return_value=provider):
+                with self.assertRaisesRegex(ProviderError, "cyber"):
+                    install(project, "task", task_id="architect", attempts=3)
+
+            self.assertEqual(provider.calls, 1)
             self.assertIsNone(blueprint(project))
             self.assertEqual(entries(project), [])
 

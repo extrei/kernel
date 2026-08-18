@@ -11,8 +11,14 @@ from kernel import BlueprintError, StateTreeError
 
 from .architect import compose
 from .loop import run
-from .providers import APIProvider, ClaudeCodeProvider, Provider, ProviderError
-from .worker import JSON_PATCH_OUTPUT_SCHEMA
+from .providers import (
+    APIProvider,
+    ClaudeCodeProvider,
+    CodexProvider,
+    JSON_PATCH_OUTPUT_SCHEMA,
+    Provider,
+    ProviderError,
+)
 
 
 def _positive_integer(value: str) -> int:
@@ -35,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", required=True, help="ledger task identifier")
     parser.add_argument(
         "--provider",
-        choices=("api", "claude-code"),
+        choices=("api", "claude-code", "codex"),
         default="api",
         help="worker completion provider (default: api)",
     )
@@ -84,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _worker_provider(name: str, project: str) -> Provider:
     if name == "claude-code":
         return ClaudeCodeProvider(project)
+    if name == "codex":
+        return CodexProvider(project)
     return APIProvider(output_schema=JSON_PATCH_OUTPUT_SCHEMA)
 
 

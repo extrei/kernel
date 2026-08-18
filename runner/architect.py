@@ -10,6 +10,9 @@ from kernel import BlueprintError, check_blueprint, meta_schema, set_blueprint
 
 from .providers import APIProvider
 
+_ARCHITECT_MODEL = "claude-fable-5"
+_ARCHITECT_EFFORT = "xhigh"
+
 _SYSTEM_PROMPT = """You are the Architect for one project-local State Tree.
 Return exactly one JSON Blueprint version 2 object, with no Markdown fences or prose.
 The Blueprint must satisfy the supplied Meta-schema and the task.
@@ -70,7 +73,11 @@ def _attempt(
     if type(attempts) is not int or attempts < 1:
         raise ValueError("attempts must be a positive integer")
     authority_schema = meta_schema()
-    provider = APIProvider(output_schema=authority_schema)
+    provider = APIProvider(
+        output_schema=authority_schema,
+        model=_ARCHITECT_MODEL,
+        effort=_ARCHITECT_EFFORT,
+    )
     provider.preflight()
     errors: list[str] = []
     last_error: BlueprintError | None = None

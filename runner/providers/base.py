@@ -6,6 +6,21 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+JSON_PATCH_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "additionalProperties": False,
+        "properties": {
+            "op": {"enum": ["add", "replace", "remove", "test"]},
+            "path": {"type": "string"},
+            "value": {},
+        },
+        "required": ["op", "path"],
+        "type": "object",
+    },
+}
+
+
 class ProviderError(RuntimeError):
     """Raised when a completion provider is unavailable or returns bad data."""
 

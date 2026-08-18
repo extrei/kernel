@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from runner.cli import main
+from runner.cli import _worker_provider, main
 
 
 class RunnerCLITests(unittest.TestCase):
@@ -63,6 +63,14 @@ class RunnerCLITests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(order, ["preflight", "run"])
+
+    def test_codex_provider_selection(self) -> None:
+        provider = Mock()
+        with patch("runner.cli.CodexProvider", return_value=provider) as factory:
+            selected = _worker_provider("codex", "/project")
+
+        self.assertIs(selected, provider)
+        factory.assert_called_once_with("/project")
 
 
 if __name__ == "__main__":

@@ -19,21 +19,7 @@ from kernel import (
     view,
 )
 
-from .providers import Completion, Provider
-
-JSON_PATCH_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "additionalProperties": False,
-        "properties": {
-            "op": {"enum": ["add", "replace", "remove", "test"]},
-            "path": {"type": "string"},
-            "value": {},
-        },
-        "required": ["op", "path"],
-        "type": "object",
-    },
-}
+from .providers import Completion, JSON_PATCH_OUTPUT_SCHEMA, Provider
 
 _SYSTEM_PROMPT = """You are one worker in a project-local State Tree.
 Return exactly one JSON Patch array with no Markdown fences or prose.

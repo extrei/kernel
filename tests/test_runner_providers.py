@@ -75,6 +75,60 @@ class RunnerProviderTests(unittest.TestCase):
 
         factory.assert_called_once_with()
 
+    def test_fable_provider_uses_beta_fallback_without_thinking(self) -> None:
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="{}")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=100, output_tokens=20),
+        )
+        messages = _Messages(response)
+        client = SimpleNamespace(beta=SimpleNamespace(messages=messages))
+        provider = APIProvider(
+            output_schema={"type": "object"},
+            model="claude-fable-5",
+            effort="xhigh",
+            client=client,
+        )
+
+        completion = provider.complete(
+            system="system",
+            messages=[{"role": "user", "content": "task"}],
+        )
+
+        self.assertEqual(completion.text, "{}")
+        self.assertAlmostEqual(completion.cost_usd, 0.002)
+        arguments = messages.arguments
+        self.assertEqual(arguments["model"], "claude-fable-5")
+        self.assertEqual(arguments["max_tokens"], 32_000)
+        self.assertEqual(arguments["betas"], ["server-side-fallback-2026-07-01"])
+        self.assertEqual(arguments["fallbacks"], "default")
+        self.assertEqual(arguments["output_config"]["effort"], "xhigh")
+        self.assertNotIn("thinking", arguments)
+        self.assertNotIn("budget_tokens", repr(arguments))
+
+    def test_fable_refusal_surfaces_category_before_content(self) -> None:
+        response = SimpleNamespace(
+            content=[],
+            stop_details=SimpleNamespace(
+                category="reasoning_extraction",
+                explanation="The request sought hidden reasoning.",
+            ),
+            stop_reason="refusal",
+        )
+        messages = _Messages(response)
+        client = SimpleNamespace(beta=SimpleNamespace(messages=messages))
+        provider = APIProvider(
+            model="claude-fable-5",
+            effort="xhigh",
+            client=client,
+        )
+
+        with self.assertRaisesRegex(ProviderError, "reasoning_extraction"):
+            provider.complete(
+                system="system",
+                messages=[{"role": "user", "content": "task"}],
+            )
+
     def test_claude_code_parses_recorded_envelope_and_restricts_tools(self) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
 
