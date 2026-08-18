@@ -128,6 +128,7 @@ def set_schema(
             parent_state=kernel_state["state_head"],
             state=kernel_state["state_head"],
             schema=schema_reference,
+            contracts=kernel_state["contracts_head"],
             view=None,
             schema_transition=True,
         )

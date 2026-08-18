@@ -15,11 +15,11 @@ This creates the local ledger boundary:
 ```text
 .state-tree/
 ├── .gitignore              # excludes runtime state only
-├── kernel.json             # revision plus ledger and state heads
+├── kernel.json             # revision plus ledger, state, schema, contract heads
 ├── kernel.lock             # ignored; recreated when a writer starts
 ├── cache/verified          # ignored, disposable verification checkpoint
 └── objects/
-    └── sha256/             # entries, artifacts, patches, and snapshots
+    └── sha256/             # entries, artifacts, patches, snapshots, authorities
 ```
 
 Repeating initialization against a valid tree is a safe no-op; it never replaces existing state.
@@ -69,15 +69,19 @@ record = apply_patch(
 assert state(project) == {"status": "ready"}
 ```
 
-A competing write prepared from the same parent raises `StaleParentError`. `remove` is rejected unless `allow_remove=True`; `move` and `copy` are unsupported.
+A competing write prepared from the same parent raises `StaleParentError`. `remove` is rejected unless the active write contract grants the path and sets `allow_remove` for the actor; there is no caller-supplied override. `move` and `copy` are unsupported.
 
-Every ledger v3 entry carries `parent_state`, `state`, nullable `view`, and nullable `schema` references. Artifact-only steps set `parent_state == state`, explicitly recording that they do not change project state.
+Every ledger v4 entry carries `parent_state`, `state`, nullable `view`, nullable `schema`, and nullable `contracts` references. Artifact-only steps set `parent_state == state`, explicitly recording that they do not change project state.
 
 `set_schema(...)` places a valid Draft 2020-12 schema in force only when the current Snapshot satisfies it. Later patches are rejected before object storage when their candidate Snapshot violates that schema. `verify(...)` remains structural; `audit_schema(...)` explicitly re-evaluates each historical Snapshot against the schema recorded on its own ledger entry.
 
 When a schema marks an array with `"x-kernel-collection": true`, the persisted Snapshot returned by `state()` contains `{"$collection":"sha256:…"}` at that path rather than the inlined array. Use `collection(project, pointer)` to resolve that array.
 
 The exact one-key `$collection` object is reserved for this reference form.
+
+`set_contracts(...)` places actor-specific path grants in force. `add`, `replace`, and `remove` require a matching `write` pattern; `test` requires a matching `read` pattern. Patterns match complete JSON Pointer segments, so `/plan` does not grant `/plan/status`, while `/plan/*` grants exactly one child segment. An active contract rejects actors it does not name.
+
+With no contract in force, non-removal patches remain allowed and `remove` fails closed. Authorization runs before collection hydration, patch evaluation, schema validation, or object storage. `verify(...)` checks contract objects structurally; `audit_contracts(...)` is the explicit human audit of historical patch authority.
 
 Normal verification may reuse `.state-tree/cache/verified`; malformed, missing, or mismatched checkpoints fall back to genesis verification. `verify(project, strict=True)` always ignores the checkpoint. Deleting `.state-tree/cache/` is always safe.
 

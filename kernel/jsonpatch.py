@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 
 class PatchError(ValueError):
     """Raised when a JSON Patch document cannot be applied."""
+
+
+@dataclass(frozen=True)
+class _OperationSyntax:
+    name: str
+    path: str
+    tokens: tuple[str, ...]
+
+
+def touched_paths(patch: Any) -> list[tuple[str, str]]:
+    """Validate patch syntax and return each operation with its target path."""
+
+    return [(item.name, item.path) for item in _parse_patch(patch)]
 
 
 def apply_patch(
@@ -18,16 +32,19 @@ def apply_patch(
 ) -> Any:
     """Apply add, replace, test, and optionally remove to a deep copy."""
 
-    if not isinstance(patch, list):
-        raise PatchError("patch must be an array")
+    parsed_patch = _parse_patch(patch)
 
     try:
         result = deepcopy(document)
     except Exception as error:
         raise PatchError("document cannot be copied") from error
-    for index, operation in enumerate(patch):
+    for index, (operation, syntax) in enumerate(
+        zip(patch, parsed_patch, strict=True)
+    ):
         try:
-            result = _apply_operation(result, operation, allow_remove=allow_remove)
+            if syntax.name == "remove" and not allow_remove:
+                raise PatchError("remove is not allowed")
+            result = _apply_operation(result, operation, syntax=syntax)
         except PatchError as error:
             raise PatchError(f"operation {index}: {error}") from error
         except Exception as error:
@@ -35,7 +52,19 @@ def apply_patch(
     return result
 
 
-def _apply_operation(document: Any, operation: Any, *, allow_remove: bool) -> Any:
+def _parse_patch(patch: Any) -> list[_OperationSyntax]:
+    if not isinstance(patch, list):
+        raise PatchError("patch must be an array")
+    parsed = []
+    for index, operation in enumerate(patch):
+        try:
+            parsed.append(_parse_operation(operation))
+        except PatchError as error:
+            raise PatchError(f"operation {index}: {error}") from error
+    return parsed
+
+
+def _parse_operation(operation: Any) -> _OperationSyntax:
     if not isinstance(operation, dict):
         raise PatchError("operation must be an object")
     name = operation.get("op")
@@ -43,17 +72,26 @@ def _apply_operation(document: Any, operation: Any, *, allow_remove: bool) -> An
         raise PatchError(f"{name} is not supported")
     if name not in {"add", "replace", "test", "remove"}:
         raise PatchError("op must be add, replace, test, or remove")
-    if name == "remove" and not allow_remove:
-        raise PatchError("remove is not allowed")
 
     path = operation.get("path")
-    tokens = _pointer_tokens(path)
+    tokens = tuple(_pointer_tokens(path))
     if name in {"add", "replace", "test"} and "value" not in operation:
         raise PatchError(f"{name} requires value")
+    return _OperationSyntax(name=name, path=path, tokens=tokens)
+
+
+def _apply_operation(
+    document: Any,
+    operation: dict[str, Any],
+    *,
+    syntax: _OperationSyntax,
+) -> Any:
+    name = syntax.name
+    tokens = syntax.tokens
     if not tokens:
         return _apply_at_root(document, operation)
 
-    parent, token = _resolve_parent(document, tokens)
+    parent, token = _resolve_parent(document, list(tokens))
     if isinstance(parent, dict):
         return _apply_to_object(document, parent, token, operation)
     if isinstance(parent, list):

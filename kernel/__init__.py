@@ -1,7 +1,16 @@
 """Local kernel primitives for projects."""
 
+from .contracts import (
+    ContractError,
+    ContractRecord,
+    UnauthorizedWriteError,
+    audit_contracts,
+    authorize,
+    contracts,
+    set_contracts,
+)
 from .controller import StepError, StepRecord, read_artifact, record_step
-from .jsonpatch import PatchError
+from .jsonpatch import PatchError, touched_paths
 from .kernel import (
     InitResult,
     LedgerIntegrityError,
@@ -22,26 +31,34 @@ from .schema import (
 )
 
 __all__ = [
+    "ContractError",
+    "ContractRecord",
     "InitResult",
     "LedgerIntegrityError",
     "PatchError",
     "PatchRecord",
     "SchemaError",
     "SchemaRecord",
-    "StateTreeError",
     "StaleParentError",
+    "StateTreeError",
     "StepError",
     "StepRecord",
+    "UnauthorizedWriteError",
     "apply_patch",
+    "audit_contracts",
     "audit_schema",
+    "authorize",
     "collection",
+    "contracts",
     "entries",
     "initialize",
     "read_artifact",
     "record_step",
     "schema",
+    "set_contracts",
     "set_schema",
     "state",
+    "touched_paths",
     "validate",
     "verify",
 ]

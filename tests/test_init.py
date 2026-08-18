@@ -37,6 +37,7 @@ class StateTreeInitializationTests(unittest.TestCase):
             self.assertEqual(state["format_version"], 1)
             self.assertEqual(state["ledger_head"], f"sha256:{_GENESIS_HASH}")
             self.assertEqual(state["revision"], 0)
+            self.assertIsNone(state["contracts_head"])
             self.assertIsNone(state["schema_head"])
             self.assertEqual(state["state_head"], f"sha256:{sha256(b'{}').hexdigest()}")
             object_directory = state_tree / OBJECTS_DIRECTORY / "sha256"

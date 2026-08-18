@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .jsonpatch import PatchError, apply_patch as apply_json_patch
+from .contracts import _read_contract_object, authorize
+from .jsonpatch import PatchError, apply_patch as apply_json_patch, touched_paths
 from .kernel import (
     STATE_TREE_DIRECTORY,
     StateTreeError,
@@ -74,7 +75,6 @@ def apply_patch(
     parent_state: str,
     view: str | None = None,
     kind: str = "patch",
-    allow_remove: bool = False,
 ) -> PatchRecord:
     """Compare parent_state and atomically commit a patch plus its new snapshot."""
 
@@ -84,6 +84,7 @@ def apply_patch(
         raise PatchError(
             "kind must be 1-32 letters, digits, dots, hyphens, or underscores"
         )
+    patch_paths = touched_paths(patch)
 
     root = _resolve_project_root(project_root)
     state_tree = root / STATE_TREE_DIRECTORY
@@ -95,13 +96,20 @@ def apply_patch(
             )
 
         object_directory = _object_directory(state_tree)
+        contracts_reference = kernel_state["contracts_head"]
+        current_contract = _read_contract_object(
+            object_directory, contracts_reference
+        )
+        authorize(patch_paths, current_contract, actor=actor)
+        allow_remove = any(
+            operation == "remove" for operation, _ in patch_paths
+        )
+
         current = _read_snapshot_object(
             object_directory, parent_state, label="parent state"
         )
         current = _hydrate_collections(current, object_directory)
-        next_snapshot = apply_json_patch(
-            current, patch, allow_remove=allow_remove
-        )
+        next_snapshot = apply_json_patch(current, patch, allow_remove=allow_remove)
         if not isinstance(next_snapshot, dict):
             raise PatchError("state snapshot must remain a JSON object")
 
@@ -134,6 +142,7 @@ def apply_patch(
             parent_state=parent_state,
             state=state_hash,
             schema=schema_reference,
+            contracts=contracts_reference,
             view=view,
         )
 

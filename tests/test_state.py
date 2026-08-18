@@ -4,7 +4,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from kernel import PatchError, StaleParentError, apply_patch, state
+from kernel import (
+    StaleParentError,
+    UnauthorizedWriteError,
+    apply_patch,
+    state,
+)
 from kernel.controller import record_step
 from kernel.kernel import LedgerIntegrityError, initialize, verify
 
@@ -58,14 +63,15 @@ class StateTests(unittest.TestCase):
             self.assertEqual(self._kernel_state(project)["state_head"], second.state)
 
             entry = self._object_json(project, second.entry_hash)
-            self.assertEqual(entry["version"], 3)
+            self.assertEqual(entry["version"], 4)
             self.assertEqual(entry["payload_hash"], second.patch_hash)
             self.assertEqual(entry["parent_state"], first.state)
             self.assertEqual(entry["state"], second.state)
             self.assertIsNone(entry["schema"])
+            self.assertIsNone(entry["contracts"])
             self.assertIsNone(entry["view"])
 
-    def test_remove_requires_explicit_privilege(self) -> None:
+    def test_remove_has_no_caller_supplied_privilege(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
@@ -79,7 +85,7 @@ class StateTests(unittest.TestCase):
             )
             removal = [{"op": "remove", "path": "/temporary"}]
 
-            with self.assertRaises(PatchError):
+            with self.assertRaises(UnauthorizedWriteError):
                 apply_patch(
                     project,
                     actor="codex",
@@ -87,15 +93,15 @@ class StateTests(unittest.TestCase):
                     parent_state=created.state,
                     patch=removal,
                 )
-            removed = apply_patch(
-                project,
-                actor="codex",
-                task_id="remove-test",
-                parent_state=created.state,
-                patch=removal,
-                allow_remove=True,
-            )
-            self.assertEqual(state(project, at=removed.state), {})
+            with self.assertRaises(TypeError):
+                apply_patch(
+                    project,
+                    actor="codex",
+                    task_id="remove-test",
+                    parent_state=created.state,
+                    patch=removal,
+                    allow_remove=True,
+                )
 
     def test_stale_parent_leaves_all_durable_heads_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -143,7 +149,7 @@ class StateTests(unittest.TestCase):
             self.assertEqual(entry["state"], changed.state)
             self.assertEqual(self._kernel_state(project)["state_head"], changed.state)
 
-    def test_tampered_snapshot_and_v2_entry_fail_verification(self) -> None:
+    def test_tampered_snapshot_and_v3_entry_fail_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             initialize(project)
@@ -168,12 +174,12 @@ class StateTests(unittest.TestCase):
             record = record_step(
                 project,
                 agent="codex",
-                task_id="v1-rejection",
+                task_id="v3-rejection",
                 artifact=artifact,
                 kind="result",
             )
             entry = self._object_json(project, record.entry_hash)
-            entry["version"] = 2
+            entry["version"] = 3
             content = json.dumps(entry, separators=(",", ":"), sort_keys=True).encode()
             digest = sha256(content).hexdigest()
             (self._object_directory(project) / digest).write_bytes(content)

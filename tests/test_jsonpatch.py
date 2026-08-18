@@ -1,10 +1,34 @@
 from copy import deepcopy
 import unittest
 
-from kernel.jsonpatch import PatchError, apply_patch
+from kernel.jsonpatch import PatchError, apply_patch, touched_paths
 
 
 class JsonPatchTests(unittest.TestCase):
+    def test_touched_paths_validates_the_whole_patch_without_state(self) -> None:
+        patch = [
+            {"op": "test", "path": "/plan/status", "value": "draft"},
+            {"op": "add", "path": "/claims/-", "value": {}},
+            {"op": "remove", "path": "/obsolete"},
+        ]
+
+        self.assertEqual(
+            touched_paths(patch),
+            [
+                ("test", "/plan/status"),
+                ("add", "/claims/-"),
+                ("remove", "/obsolete"),
+            ],
+        )
+
+        with self.assertRaisesRegex(PatchError, "operation 1"):
+            touched_paths(
+                [
+                    {"op": "add", "path": "/valid", "value": 1},
+                    {"op": "replace", "path": "invalid", "value": 2},
+                ]
+            )
+
     def test_add_replace_test_and_pointer_escapes_apply_to_a_copy(self) -> None:
         original = {
             "profile": {"name": "Ada"},

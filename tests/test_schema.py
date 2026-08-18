@@ -144,7 +144,8 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(entry["parent_state"], genesis)
             self.assertEqual(entry["state"], genesis)
             self.assertEqual(entry["schema"], record.schema)
-            self.assertEqual(entry["version"], 3)
+            self.assertEqual(entry["version"], 4)
+            self.assertIsNone(entry["contracts"])
             self.assertEqual(schema(project), definition)
 
             cleared = set_schema(

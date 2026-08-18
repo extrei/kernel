@@ -28,6 +28,14 @@ _Avoid_: Validator, state model
 The reference to the Schema currently governing accepted Snapshots.
 _Avoid_: Current validator, schema cache
 
+**Write Contract**:
+A durable actor-specific grant defining which Snapshot paths may be read as Patch preconditions or written.
+_Avoid_: Prompt permission, role description
+
+**Contract Head**:
+The reference to the Write Contract currently governing Patch authority.
+_Avoid_: Permission cache, current role
+
 **Collection**:
 A separately retained sequence referenced by a Snapshot rather than embedded in it.
 _Avoid_: Inline array, project history

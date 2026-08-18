@@ -39,6 +39,7 @@ class ReconstructionTests(unittest.TestCase):
 
             self.assertEqual(state["format"], "state-tree")
             self.assertEqual(state["format_version"], 1)
+            self.assertIsNone(state["contracts_head"])
             self.assertIsNone(state["schema_head"])
             genesis_state = f"sha256:{sha256(b'{}').hexdigest()}"
             self.assertIn(self._digest(state["state_head"]), objects)
@@ -50,6 +51,7 @@ class ReconstructionTests(unittest.TestCase):
                     set(entry),
                     {
                         "actor",
+                        "contracts",
                         "kind",
                         "metadata",
                         "parent_state",
@@ -64,13 +66,14 @@ class ReconstructionTests(unittest.TestCase):
                         "view",
                     },
                 )
-                self.assertEqual(entry["version"], 3)
+                self.assertEqual(entry["version"], 4)
                 self.assertEqual(entry["sequence"], expected_sequence)
                 self.assertIn(self._digest(entry["payload_hash"]), objects)
                 self.assertIn(self._digest(entry["parent_state"]), objects)
                 self.assertIn(self._digest(entry["state"]), objects)
                 self.assertIsNone(entry["view"])
                 self.assertIsNone(entry["schema"])
+                self.assertIsNone(entry["contracts"])
                 reverse_chain.append(entry)
                 current_digest = entry["previous_hash"]
 

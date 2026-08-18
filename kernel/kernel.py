@@ -34,11 +34,12 @@ _RUNTIME_IGNORE_RULES = (
 _GENESIS_HASH = "0" * 64
 _GENESIS_STATE_CONTENT = b"{}"
 _GENESIS_STATE_REFERENCE = f"{HASH_ALGORITHM}:{sha256(_GENESIS_STATE_CONTENT).hexdigest()}"
-_LEDGER_ENTRY_VERSION = 3
+_LEDGER_ENTRY_VERSION = 4
 _CHECKPOINT_FORMAT_VERSION = 2
 _COLLECTION_REFERENCE_KEY = "$collection"
 _LEDGER_ENTRY_KEYS = {
     "actor",
+    "contracts",
     "kind",
     "metadata",
     "parent_state",
@@ -83,6 +84,7 @@ class LedgerAppend:
     parent_state: str
     state: str
     schema: str | None
+    contracts: str | None
     view: str | None
 
 
@@ -132,6 +134,7 @@ def entries(project_root: str | Path = ".") -> list[dict[str, Any]]:
         head_digest=head_digest,
         state_head=state["state_head"],
         schema_head=state["schema_head"],
+        contracts_head=state["contracts_head"],
         checkpoint=None,
     )
     _write_checkpoint_best_effort(
@@ -198,6 +201,7 @@ def append_ledger_entry(
             parent_state=state_head,
             state=state_head,
             schema=kernel_state["schema_head"],
+            contracts=kernel_state["contracts_head"],
             view=None,
         )
 
@@ -214,8 +218,10 @@ def _append_ledger_entry_locked(
     parent_state: str,
     state: str,
     schema: str | None,
+    contracts: str | None,
     view: str | None,
     schema_transition: bool = False,
+    contracts_transition: bool = False,
 ) -> LedgerAppend:
     """Append after the caller has locked and verified the current state."""
 
@@ -223,8 +229,16 @@ def _append_ledger_entry_locked(
         raise StateTreeError("ledger parent state does not match the current state head")
     if not schema_transition and schema != kernel_state["schema_head"]:
         raise StateTreeError("ledger schema does not match the current schema head")
+    if not contracts_transition and contracts != kernel_state["contracts_head"]:
+        raise StateTreeError("ledger contracts do not match the current contracts head")
+    if schema_transition and contracts_transition:
+        raise StateTreeError("a ledger entry cannot transition schema and contracts together")
     if schema_transition and (kind != "schema" or parent_state != state):
         raise StateTreeError("schema transitions must be unchanged-state schema entries")
+    if contracts_transition and (kind != "contracts" or parent_state != state):
+        raise StateTreeError(
+            "contract transitions must be unchanged-state contracts entries"
+        )
 
     object_directory = _object_directory(state_tree)
     payload_digest = _digest_from_reference(payload_hash, label="payload")
@@ -233,6 +247,8 @@ def _append_ledger_entry_locked(
     _read_snapshot_object(object_directory, state, label="state")
     if schema is not None:
         _read_json_mapping_object(object_directory, schema, label="schema")
+    if contracts is not None:
+        _read_json_mapping_object(object_directory, contracts, label="contracts")
     if view is not None:
         view_digest = _digest_from_reference(view, label="view")
         _read_hashed_object(object_directory, view_digest, label="view")
@@ -246,6 +262,7 @@ def _append_ledger_entry_locked(
     )
     entry = {
         "actor": actor,
+        "contracts": contracts,
         "kind": kind,
         "metadata": dict(metadata),
         "parent_state": parent_state,
@@ -270,6 +287,7 @@ def _append_ledger_entry_locked(
     next_kernel_state["revision"] = sequence
     next_kernel_state["state_head"] = state
     next_kernel_state["schema_head"] = schema
+    next_kernel_state["contracts_head"] = contracts
     _write_kernel_state(state_tree, next_kernel_state)
 
     return LedgerAppend(
@@ -281,6 +299,7 @@ def _append_ledger_entry_locked(
         parent_state=parent_state,
         state=state,
         schema=schema,
+        contracts=contracts,
         view=view,
     )
 
@@ -296,6 +315,7 @@ def _create_state_tree(state_tree: Path) -> None:
     kernel_state = {
         "format": FORMAT_NAME,
         "format_version": FORMAT_VERSION,
+        "contracts_head": None,
         "ledger_head": f"{HASH_ALGORITHM}:{_GENESIS_HASH}",
         "revision": 0,
         "schema_head": None,
@@ -340,6 +360,11 @@ def _read_kernel_state(state_tree: Path) -> dict[str, Any]:
     schema_head = parsed_state.get("schema_head")
     if schema_head is not None:
         _digest_from_reference(schema_head, label="schema head")
+    if "contracts_head" not in parsed_state:
+        raise StateTreeError(f"Kernel state has no contracts head: {state_file}")
+    contracts_head = parsed_state["contracts_head"]
+    if contracts_head is not None:
+        _digest_from_reference(contracts_head, label="contracts head")
 
     return parsed_state
 
@@ -356,6 +381,7 @@ def _validated_kernel_state(
         head_digest=head_digest,
         state_head=state["state_head"],
         schema_head=state["schema_head"],
+        contracts_head=state["contracts_head"],
         checkpoint=checkpoint,
     )
     _write_checkpoint_best_effort(
@@ -371,6 +397,7 @@ def _verify_ledger(
     head_digest: str,
     state_head: str,
     schema_head: str | None,
+    contracts_head: str | None,
     checkpoint: tuple[int, str] | None,
 ) -> list[dict[str, Any]]:
     if revision == 0:
@@ -380,6 +407,8 @@ def _verify_ledger(
             raise LedgerIntegrityError("empty ledger does not point to the genesis state")
         if schema_head is not None:
             raise LedgerIntegrityError("empty ledger has a schema head")
+        if contracts_head is not None:
+            raise LedgerIntegrityError("empty ledger has a contracts head")
         _read_snapshot_object(object_directory, state_head, label="genesis state")
         return []
 
@@ -448,6 +477,8 @@ def _verify_ledger(
         raise LedgerIntegrityError("kernel state head does not match the verified chain")
     if ordered_chain[-1][1]["schema"] != schema_head:
         raise LedgerIntegrityError("kernel schema head does not match the verified chain")
+    if ordered_chain[-1][1]["contracts"] != contracts_head:
+        raise LedgerIntegrityError("kernel contracts head does not match the verified chain")
     return [entry for _, entry in ordered_chain]
 
 
@@ -495,6 +526,13 @@ def _validate_ledger_entry(
             object_directory,
             schema,
             label=f"ledger sequence {expected_sequence} schema",
+        )
+    contracts = entry.get("contracts")
+    if contracts is not None:
+        _read_json_mapping_object(
+            object_directory,
+            contracts,
+            label=f"ledger sequence {expected_sequence} contracts",
         )
     view = entry.get("view")
     if view is not None:
